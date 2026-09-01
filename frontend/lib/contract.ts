@@ -1,4 +1,4 @@
-import { createClient, chains, createAccount } from "genlayer-js";
+import { createClient, chains } from "genlayer-js";
 import type { Address } from "genlayer-js/types";
 
 const CONTRACT_ADDRESS =
@@ -62,13 +62,17 @@ export async function fetchAllProposals(): Promise<Proposal[]> {
   return (result as unknown as Proposal[]) ?? [];
 }
 
+// account is a plain address string (not an Account object) so genlayer-js
+// routes eth_sendTransaction through window.ethereum (MetaMask / injected wallet).
 export async function submitProposal(
   githubUrl: string,
   requestedTokens: number,
-  privateKey: `0x${string}`
+  address: string
 ): Promise<`0x${string}`> {
-  const account = createAccount(privateKey);
-  const client = createClient({ chain: chains.studionet, account });
+  if (typeof window === "undefined" || !window.ethereum) {
+    throw new Error("No wallet provider detected. Please install MetaMask.");
+  }
+  const client = createClient({ chain: chains.studionet, account: address as Address });
   const amountAtto = BigInt(Math.round(requestedTokens)) * BigInt(10 ** 18);
   const txHash = await client.writeContract({
     address: CONTRACT_ADDRESS,

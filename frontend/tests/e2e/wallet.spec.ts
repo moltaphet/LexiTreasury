@@ -1,97 +1,117 @@
 // tests/e2e/wallet.spec.ts
-// Tests the Connect Wallet panel in the header: open, validate, connect, disconnect.
+// Tests the Connect Wallet panel in the header: open, connect via MetaMask mock, disconnect.
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
-// A syntactically valid 32-byte hex key (Hardhat dev account #0 -- safe for testnet demos).
-const VALID_TEST_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-const EXPECTED_ADDRESS_SHORT = "0xf39F"; // first 6 chars of the derived address
+const MOCK_ADDR = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+
+// Injects a minimal EIP-1193 mock into the page before navigation.
+// eth_accounts returns [] so there is no auto-connect on mount.
+// eth_requestAccounts returns the mock address (simulates MetaMask approval).
+async function injectWalletMock(page: Page): Promise<void> {
+  await page.addInitScript((addr) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).ethereum = {
+      isMetaMask: true,
+      request: async ({ method }: { method: string }) => {
+        if (method === "eth_requestAccounts") return [addr];
+        if (method === "eth_accounts") return [];
+        if (method === "eth_chainId") return "0xf22f";
+        if (method === "wallet_switchEthereumChain") return null;
+        if (method === "wallet_addEthereumChain") return null;
+        if (method === "eth_sendTransaction") return "0x" + "d".repeat(64);
+        return null;
+      },
+      on: (_event: string, _fn: unknown) => {},
+      removeListener: (_event: string, _fn: unknown) => {},
+    };
+  }, MOCK_ADDR);
+}
+
+// Click "Connect MetaMask" in the already-open panel and wait for the header address button.
+async function completeConnect(page: Page): Promise<void> {
+  await page.getByRole("button", { name: /Connect MetaMask/i }).click();
+  // Scope to the button role so the "Signing as" chip in the Submit tab doesn't cause a clash.
+  await expect(page.getByRole("button", { name: /0xf39F/ })).toBeVisible();
+}
 
 test.describe("Wallet Connect Panel", () => {
   test.beforeEach(async ({ page }) => {
+    await injectWalletMock(page);
     await page.goto("/");
   });
 
   test("Connect Wallet button opens the panel", async ({ page }) => {
     await page.getByText("Connect Wallet").click();
-    await expect(page.getByText("Connect StudioNet Account")).toBeVisible();
+    await expect(page.getByText("Connect MetaMask")).toBeVisible();
   });
 
   test("panel closes when Cancel is clicked", async ({ page }) => {
     await page.getByText("Connect Wallet").click();
     await page.getByRole("button", { name: "Cancel" }).click();
-    await expect(page.getByText("Connect StudioNet Account")).not.toBeVisible();
+    await expect(page.getByText("Connect MetaMask")).not.toBeVisible();
   });
 
-  test("panel shows an error for a key that is too short", async ({ page }) => {
+  test("connecting via MetaMask shows address in header", async ({ page }) => {
     await page.getByText("Connect Wallet").click();
-    const input = page.locator('input[placeholder="0x..."]').first();
-    await input.fill("0xdeadbeef");
-    await page.getByRole("button", { name: /^Connect$/ }).click();
-    await expect(page.getByText(/32-byte|66 chars/i)).toBeVisible();
-  });
-
-  test("panel shows an error for a non-hex string", async ({ page }) => {
-    await page.getByText("Connect Wallet").click();
-    const input = page.locator('input[placeholder="0x..."]').first();
-    await input.fill("this-is-not-a-key");
-    await page.getByRole("button", { name: /^Connect$/ }).click();
-    await expect(page.getByText(/32-byte|66 chars/i)).toBeVisible();
-  });
-
-  test("connecting with a valid key shows the address in the header", async ({ page }) => {
-    await page.getByText("Connect Wallet").click();
-    const input = page.locator('input[placeholder="0x..."]').first();
-    await input.fill(VALID_TEST_KEY);
-    await page.getByRole("button", { name: /^Connect$/ }).click();
-    // Panel should close and the header should now show the derived address
+    await completeConnect(page);
     await expect(page.getByText("Connect Wallet")).not.toBeVisible();
-    await expect(page.getByText(new RegExp(EXPECTED_ADDRESS_SHORT, "i"))).toBeVisible();
+    await expect(page.getByText("0xf39F")).toBeVisible();
   });
 
   test("disconnecting returns the header to the Connect Wallet state", async ({ page }) => {
-    // Connect first
     await page.getByText("Connect Wallet").click();
-    await page.locator('input[placeholder="0x..."]').first().fill(VALID_TEST_KEY);
-    await page.getByRole("button", { name: /^Connect$/ }).click();
-    await expect(page.getByText(new RegExp(EXPECTED_ADDRESS_SHORT, "i"))).toBeVisible();
+    await completeConnect(page);
 
-    // Open the connected account panel and disconnect
-    await page.getByText(new RegExp(EXPECTED_ADDRESS_SHORT, "i")).click();
+    // Open account dropdown and disconnect
+    await page.getByText("0xf39F").click();
     await page.getByRole("button", { name: "Disconnect" }).click();
 
-    // Header should revert to showing Connect Wallet
     await expect(page.getByText("Connect Wallet")).toBeVisible();
   });
 
-  test("connected wallet shows the full address in the dropdown", async ({ page }) => {
+  test("connected wallet shows full address in dropdown", async ({ page }) => {
     await page.getByText("Connect Wallet").click();
-    await page.locator('input[placeholder="0x..."]').first().fill(VALID_TEST_KEY);
-    await page.getByRole("button", { name: /^Connect$/ }).click();
-    // Open the account panel to see the full address
-    await page.getByText(new RegExp(EXPECTED_ADDRESS_SHORT, "i")).click();
+    await completeConnect(page);
+
+    // Open account dropdown
+    await page.getByText("0xf39F").click();
     await expect(page.getByText("Connected Account")).toBeVisible();
     await expect(page.getByText("StudioNet (Chain 61999)")).toBeVisible();
   });
 });
 
-test.describe("Submit form wallet integration", () => {
-  test("private key field is hidden when wallet is connected", async ({ page }) => {
+test.describe("Wallet Connect Panel (no wallet installed)", () => {
+  test.beforeEach(async ({ page }) => {
+    // No mock injected -- window.ethereum remains undefined
     await page.goto("/");
+  });
 
-    // Navigate to Submit tab
+  test("shows hint when no wallet is installed", async ({ page }) => {
+    await page.getByText("Connect Wallet").click();
+    await expect(page.getByText(/No wallet detected/i)).toBeVisible();
+  });
+});
+
+test.describe("Submit form wallet integration", () => {
+  test.beforeEach(async ({ page }) => {
+    await injectWalletMock(page);
+    await page.goto("/");
+  });
+
+  test("Signing as chip appears after wallet is connected", async ({ page }) => {
     await page.locator("#app-tabs").getByRole("button", { name: /Submit Proposal/ }).click();
 
-    // Before connecting: private key input should be visible
-    await expect(page.getByPlaceholder(/0x\.\.\./i)).toBeVisible();
+    // Not yet connected -- chip should not be visible
+    await expect(page.getByText("Signing as")).not.toBeVisible();
 
     // Connect wallet via header
     await page.getByText("Connect Wallet").click();
-    await page.locator('input[placeholder="0x..."]').first().fill(VALID_TEST_KEY);
-    await page.getByRole("button", { name: /^Connect$/ }).click();
+    await completeConnect(page);
 
-    // After connecting: the "Signing as" chip should appear, key input should be hidden
+    // Navigate back to the Submit tab
+    await page.locator("#app-tabs").getByRole("button", { name: /Submit Proposal/ }).click();
+
     await expect(page.getByText("Signing as")).toBeVisible();
-    await expect(page.locator('input[placeholder*="0x..."]')).not.toBeVisible();
   });
 });

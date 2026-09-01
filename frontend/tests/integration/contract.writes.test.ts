@@ -50,17 +50,12 @@ skipWithoutKey("submitProposal (live StudioNet, requires TEST_PRIVATE_KEY)", () 
 });
 
 // ---------------------------------------------------------------------------
-// Key-format validation (no network needed -- createAccount throws locally)
+// Throws when no injected wallet is present (no window.ethereum in Jest)
 // ---------------------------------------------------------------------------
 describe("submitProposal input validation", () => {
-  test("throws for a private key with wrong length", async () => {
+  test("throws when no wallet provider is available", async () => {
     await expect(
-      submitProposal(TEST_REPO, 100, "0xdeadbeef" as `0x${string}`)
-    ).rejects.toThrow();
-  });
-
-  test("throws for a zero-hex private key (all zeros)", async () => {
-    const zeroKey = ("0x" + "0".repeat(64)) as `0x${string}`;
-    await expect(submitProposal(TEST_REPO, 1, zeroKey)).rejects.toThrow();
+      submitProposal(TEST_REPO, 100, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
+    ).rejects.toThrow(/wallet|ethereum/i);
   });
 });

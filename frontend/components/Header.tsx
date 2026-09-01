@@ -20,19 +20,19 @@ const STAGGER = ["0ms", "200ms", "400ms", "600ms", "800ms"];
    ============================================================ */
 function ConnectPanel({ onClose }: { onClose: () => void }) {
   const { connect, isConnected, address, disconnect } = useWallet();
-  const [keyInput, setKeyInput] = useState("");
-  const [showKey, setShowKey] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function handleConnect(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleConnect() {
+    setIsConnecting(true);
     setError(null);
-    const result = connect(keyInput.trim());
-    if ("error" in result) {
-      setError(result.error);
-    } else {
-      setKeyInput("");
+    try {
+      await connect();
       onClose();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Connection failed");
+    } finally {
+      setIsConnecting(false);
     }
   }
 
@@ -59,58 +59,40 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
     );
   }
 
+  const noWallet = typeof window !== "undefined" && !window.ethereum;
+
   return (
-    <form
-      onSubmit={handleConnect}
-      className="absolute right-0 top-full mt-2 w-80 z-50 glass-glow rounded-xl p-5 border border-slate-700/50 shadow-xl animate-fade-up"
-    >
-      <p className="text-sm font-semibold text-slate-200 mb-1">Connect StudioNet Account</p>
+    <div className="absolute right-0 top-full mt-2 w-72 z-50 glass-glow rounded-xl p-5 border border-slate-700/50 shadow-xl animate-fade-up">
+      <p className="text-sm font-semibold text-slate-200 mb-1">Connect Wallet</p>
       <p className="text-[11px] text-slate-500 mb-4 leading-relaxed">
-        Enter your GenLayer StudioNet private key. Used client-side only — never stored or transmitted.
+        Connect via MetaMask or any EIP-1193 wallet. You will be prompted to switch to GenLayer StudioNet.
       </p>
 
-      <div className="relative mb-3">
-        <input
-          type={showKey ? "text" : "password"}
-          value={keyInput}
-          onChange={(e) => setKeyInput(e.target.value)}
-          placeholder="0x..."
-          autoComplete="off"
-          spellCheck={false}
-          className="cyber-input w-full px-3 py-2.5 pr-10 rounded-lg glass border border-slate-700/60 text-slate-200 font-mono text-xs placeholder-slate-700"
-        />
-        <button
-          type="button"
-          tabIndex={-1}
-          onClick={() => setShowKey((v) => !v)}
-          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-600 hover:text-slate-400 transition-colors"
-        >
-          {showKey ? (
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-            </svg>
-          ) : (
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-            </svg>
-          )}
-        </button>
-      </div>
-
       {error && (
-        <p className="text-[11px] text-red-400 mb-3 font-mono">{error}</p>
+        <p className="text-[11px] text-red-400 mb-3 font-mono leading-relaxed">{error}</p>
       )}
 
       <div className="flex gap-2">
         <button
-          type="submit"
-          className="flex-1 glow-btn py-2 rounded-lg text-xs font-bold"
+          type="button"
+          onClick={handleConnect}
+          disabled={isConnecting}
+          className="flex-1 glow-btn py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Connect
+          {isConnecting ? (
+            <>
+              <div className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+              Connecting...
+            </>
+          ) : (
+            <>
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
+              </svg>
+              Connect MetaMask
+            </>
+          )}
         </button>
         <button
           type="button"
@@ -120,7 +102,13 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
           Cancel
         </button>
       </div>
-    </form>
+
+      {noWallet && (
+        <p className="mt-3 text-[10px] text-amber-400/80 font-mono leading-relaxed">
+          No wallet detected. Install MetaMask or Rabby to continue.
+        </p>
+      )}
+    </div>
   );
 }
 
