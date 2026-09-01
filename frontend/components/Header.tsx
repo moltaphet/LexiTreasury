@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
+import Image from "next/image";
+import Link from "next/link";
 import { useWallet } from "@/contexts/WalletContext";
 import { shortenAddress } from "@/lib/contract";
 
@@ -157,12 +159,17 @@ export default function Header() {
 
       <div className="relative max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
         {/* ---- Brand ---- */}
-        <div className="flex items-center gap-3 shrink-0">
+        <Link href="/" className="flex items-center gap-3 shrink-0 group">
           <div className="relative">
-            <div className="w-10 h-10 rounded-lg border border-cyan-400/30 bg-gradient-to-br from-cyan-400/15 to-indigo-500/10 flex items-center justify-center neon-border-cyan">
-              <span className="font-mono font-bold text-sm gradient-text tracking-tight">
-                LX
-              </span>
+            <div className="w-10 h-10 rounded-full border border-cyan-400/30 overflow-hidden neon-border-cyan group-hover:border-cyan-400/55 transition-colors duration-200">
+              <Image
+                src="/assets/logo.jpeg"
+                alt="LexiTreasury"
+                width={40}
+                height={40}
+                className="w-full h-full object-cover"
+                priority
+              />
             </div>
             <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-slate-950 animate-glow-pulse" />
           </div>
@@ -174,7 +181,7 @@ export default function Header() {
               GenLayer Autonomous DAO
             </p>
           </div>
-        </div>
+        </Link>
 
         {/* ---- Center: Contract Address Pill ---- */}
         <button
