@@ -128,7 +128,7 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
    Main Header
    ============================================================ */
 export default function Header() {
-  const { isConnected, address } = useWallet();
+  const { isConnected, address, isHydrated } = useWallet();
   const [copied, setCopied] = useState(false);
   const [showPanel, setShowPanel] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -243,8 +243,13 @@ export default function Header() {
             </span>
           </div>
 
-          {/* Wallet Connect Button */}
-          <div className="relative" ref={panelRef}>
+          {/* Wallet Connect Button — hidden during the localStorage hydration frame
+              to prevent a flash from "Connect Wallet" -> connected address */}
+          <div
+            className="relative transition-opacity duration-150"
+            style={{ opacity: isHydrated ? 1 : 0, pointerEvents: isHydrated ? "auto" : "none" }}
+            ref={panelRef}
+          >
             {isConnected && address ? (
               <button
                 onClick={() => setShowPanel((v) => !v)}
