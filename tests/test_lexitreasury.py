@@ -1,23 +1,27 @@
 """
-LexiTreasury – Comprehensive Test Suite
+LexiTreasury - Core Test Suite (hardened protocol)
 
 Coverage:
-  - Constructor: valid deployment, empty/whitespace constitution, invalid caps, ordering invariant
+  - Constructor: valid deployment, empty/whitespace constitution, invalid caps, ordering
   - View methods: get_proposal, get_proposals_by_status edge cases
-  - deposit: owner-only, positive-amount guard
-  - submit_proposal: URL parsing (variants, rejects), amount validation
-  - update_constitution: owner guard, empty guard
-  - set_tier_caps: ordering invariant, negative caps
-  - fund_proposal: full happy path, status guard, balance guard, zero-allocation guard
+  - deposit / submit_proposal / update_constitution / set_tier_caps guards
+  - fund_proposal: full happy path, status/balance/zero-allocation guards
+  - Audit attestation registry: register/revoke auditors, record/revoke attestations
   - evaluate_proposal: APPROVED/REJECTED, GitHub error classification, LLM error
-  - Tier assignment: all _compute_tier branches (TIER_1/2/3/"")
-  - Commit bracket detection: NONE(409)/MINIMAL/ACTIVE/MATURE/VETERAN
-  - Audit detection: topic-based, content file/dir, no-audit
+  - Tier assignment: all _compute_tier branches incl. anti-gaming gates
+  - Commit + contributor brackets: NONE/MINIMAL/ACTIVE/MATURE/VETERAN, BOT/SOLO/SMALL/TEAM
+  - Structural quality brackets: NONE/BASIC/STANDARD/STRONG
+  - On-chain audit verification (valid attestation) + fail-closed cases
   - GitHub error codes: [EXTERNAL] 404, [TRANSIENT] 403/429/500
-  - Determinism simulation: same inputs → identical outputs across simulated nodes
+  - Determinism simulation: same inputs -> identical outputs across simulated nodes
+
+Adversarial cases (prompt injection, forged audits, fake/bot commits) live in
+tests/direct/test_adversarial.py.
 """
 
 import json
+import hashlib
+import re
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -38,8 +42,26 @@ GH_URL = "https://github.com/test-owner/test-repo"
 OWNER = "test-owner"
 REPO = "test-repo"
 
-# The prompt always contains this phrase — reliable LLM mock anchor
+# The prompt always contains this phrase - reliable LLM mock anchor
 LLM_ANCHOR = r".*governance engine for LexiTreasury.*"
+
+# Audit attestation fixtures
+AUDITOR_ID = "trailofbits"
+AUDIT_UID = "att_0001"
+REPORT_PATH = "audit/report.pdf"
+REPORT_TEXT = "LexiTreasury verified audit report artefact v1"
+REPORT_HASH = hashlib.sha256(REPORT_TEXT.encode()).hexdigest()
+
+# Default healthy structural quality: tests dir + CI dir + build manifest -> STRONG
+DEFAULT_CONTENTS = [
+    {"name": "tests", "type": "dir"},
+    {"name": ".github", "type": "dir"},
+    {"name": "package.json", "type": "file"},
+    {"name": "README.md", "type": "file"},
+]
+
+# Default healthy contributor set: 4 distinct humans -> CONTRIB_TEAM
+DEFAULT_AUTHORS = ("alice", "bob", "carol", "dave")
 
 # ---------------------------------------------------------------------------
 # Mock helpers
@@ -49,27 +71,38 @@ def _repo_body(spdx="MIT", topics=None):
     return json.dumps({"license": {"spdx_id": spdx}, "topics": topics or []})
 
 
-def _commits_body(n):
-    return json.dumps([{"sha": f"c{i:04d}"} for i in range(n)])
+def _commits_body(n, authors=DEFAULT_AUTHORS, bots=False):
+    """Build a commits page. `authors` cycles distinct human logins; `bots` forces bot authorship."""
+    out = []
+    for i in range(n):
+        if bots:
+            out.append({
+                "sha": f"c{i:04d}",
+                "author": {"login": "dependabot[bot]", "type": "Bot"},
+                "commit": {"author": {"name": "dependabot[bot]", "email": "bot@users.noreply"}},
+            })
+        else:
+            who = authors[i % len(authors)]
+            out.append({
+                "sha": f"c{i:04d}",
+                "author": {"login": who, "type": "User"},
+                "commit": {"author": {"name": who, "email": f"{who}@example.com"}},
+            })
+    return json.dumps(out)
 
 
 def mock_repo(vm, spdx="MIT", topics=None, status=200, owner=OWNER, repo=REPO):
-    """Mock the GitHub repo-info endpoint."""
     vm.mock_web(
         rf".*api\.github\.com/repos/{owner}/{repo}$",
         {"status": status, "body": _repo_body(spdx, topics)},
     )
 
 
-def mock_commits(vm, count=50, veteran=False, page1_status=200, owner=OWNER, repo=REPO):
-    """
-    Mock the GitHub commits endpoints.
-    count  – number of items on page 1 (capped at 100 for page-1 call).
-    veteran – if True and count >= 100, probe returns 1 commit → VETERAN.
-    """
+def mock_commits(vm, count=50, veteran=False, page1_status=200,
+                 authors=DEFAULT_AUTHORS, bots=False, owner=OWNER, repo=REPO):
     vm.mock_web(
         rf".*api\.github\.com/repos/{owner}/{repo}/commits\?per_page=100",
-        {"status": page1_status, "body": _commits_body(min(count, 100))},
+        {"status": page1_status, "body": _commits_body(min(count, 100), authors=authors, bots=bots)},
     )
     if count >= 100 and page1_status == 200:
         probe_body = json.dumps([{"sha": "probe"}] if veteran else [])
@@ -80,15 +113,39 @@ def mock_commits(vm, count=50, veteran=False, page1_status=200, owner=OWNER, rep
 
 
 def mock_contents(vm, items=None, status=200, owner=OWNER, repo=REPO):
-    """Mock the GitHub repo-contents endpoint."""
+    body = DEFAULT_CONTENTS if items is None else items
     vm.mock_web(
         rf".*api\.github\.com/repos/{owner}/{repo}/contents",
-        {"status": status, "body": json.dumps(items or [])},
+        {"status": status, "body": json.dumps(body)},
     )
 
 
+def mock_audit_manifest(vm, present=False, uid=AUDIT_UID, report_hash=REPORT_HASH,
+                        report_path=REPORT_PATH, report_text=REPORT_TEXT,
+                        manifest_status=None, report_status=200, owner=OWNER, repo=REPO,
+                        manifest_body=None):
+    """Mock the well-known audit manifest and its referenced report artefact.
+
+    present=False registers a 404 for the manifest (repo publishes no attestation).
+    present=True registers a manifest + report. Override individual fields to forge cases.
+    """
+    manifest_url = rf".*raw\.githubusercontent\.com/{owner}/{repo}/HEAD/\.well-known/genlayer-audit\.json"
+    if not present:
+        vm.mock_web(manifest_url, {"status": 404, "body": "not found"})
+        return
+
+    if manifest_body is None:
+        manifest_body = json.dumps({
+            "attestation_uid": uid,
+            "report_hash": report_hash,
+            "report_path": report_path,
+        })
+    vm.mock_web(manifest_url, {"status": manifest_status or 200, "body": manifest_body})
+    report_url = rf".*raw\.githubusercontent\.com/{owner}/{repo}/HEAD/{re.escape(report_path)}"
+    vm.mock_web(report_url, {"status": report_status, "body": report_text})
+
+
 def mock_llm(vm, decision="APPROVED", reasoning="Satisfies all constitutional requirements"):
-    """Mock the LLM evaluation response."""
     vm.mock_llm(LLM_ANCHOR, json.dumps({"decision": decision, "reasoning": reasoning}))
 
 
@@ -98,22 +155,47 @@ def setup_evaluate_mocks(
     topics=None,
     commit_count=50,
     veteran=False,
+    authors=DEFAULT_AUTHORS,
+    bots=False,
     contents=None,
+    audit_present=False,
+    audit_uid=AUDIT_UID,
+    audit_report_hash=REPORT_HASH,
+    audit_report_path=REPORT_PATH,
+    audit_report_text=REPORT_TEXT,
+    audit_manifest_status=None,
+    audit_report_status=200,
+    audit_manifest_body=None,
     decision="APPROVED",
     reasoning="Satisfies all constitutional requirements",
 ):
-    """Register all three GitHub API mocks + LLM mock for one evaluate_proposal call."""
+    """Register every GitHub / raw / LLM mock for one evaluate_proposal call."""
     mock_repo(vm, spdx=spdx, topics=topics)
-    mock_commits(vm, count=commit_count, veteran=veteran)
+    mock_commits(vm, count=commit_count, veteran=veteran, authors=authors, bots=bots)
     mock_contents(vm, items=contents)
+    mock_audit_manifest(
+        vm, present=audit_present, uid=audit_uid, report_hash=audit_report_hash,
+        report_path=audit_report_path, report_text=audit_report_text,
+        manifest_status=audit_manifest_status, report_status=audit_report_status,
+        manifest_body=audit_manifest_body,
+    )
     mock_llm(vm, decision=decision, reasoning=reasoning)
 
 
+def setup_onchain_audit(treasury, direct_vm, direct_owner,
+                        uid=AUDIT_UID, github_url=GH_URL, auditor=AUDITOR_ID,
+                        report_hash=REPORT_HASH):
+    """Register a trusted auditor and record an on-chain attestation (owner action)."""
+    prev = direct_vm.sender
+    direct_vm.sender = direct_owner
+    if not treasury.is_trusted_auditor(auditor):
+        treasury.register_trusted_auditor(auditor)
+    treasury.record_audit_attestation(uid, github_url, auditor, report_hash)
+    direct_vm.sender = prev
+
+
 def submit_and_evaluate(vm, treasury, applicant, request=1_000 * ATTO, **mock_kwargs):
-    """
-    Submit a proposal and evaluate it.
-    Returns proposal_id; leaves no active mocks after the call.
-    """
+    """Submit a proposal and evaluate it. Returns proposal_id; clears mocks afterward."""
     setup_evaluate_mocks(vm, **mock_kwargs)
     vm.sender = applicant
     pid = treasury.submit_proposal(GH_URL, request)
@@ -174,7 +256,6 @@ class TestConstructor:
             direct_deploy(CONTRACT, CONSTITUTION, -1, CAP_2, CAP_3)
 
     def test_cap_ordering_violated_reverts(self, direct_vm, direct_deploy, direct_owner):
-        """cap_1 < cap_2 must be rejected."""
         direct_vm.sender = direct_owner
         with direct_vm.expect_revert("Caps must satisfy"):
             direct_deploy(CONTRACT, CONSTITUTION, CAP_3, CAP_1, CAP_2)
@@ -382,16 +463,96 @@ class TestSetTierCaps:
 
 
 # ===========================================================================
-# 7. fund_proposal
+# 7. Audit attestation registry (deterministic owner-managed trust anchor)
+# ===========================================================================
+
+class TestAuditRegistry:
+    def test_owner_registers_auditor(self, direct_vm, treasury, direct_owner):
+        direct_vm.sender = direct_owner
+        treasury.register_trusted_auditor("TrailOfBits")
+        assert treasury.is_trusted_auditor("trailofbits") is True
+        assert "trailofbits" in treasury.get_trusted_auditors()
+
+    def test_non_owner_register_reverts(self, direct_vm, treasury, direct_alice):
+        direct_vm.sender = direct_alice
+        with direct_vm.expect_revert("Only the owner can register auditors"):
+            treasury.register_trusted_auditor("acme")
+
+    def test_empty_auditor_id_reverts(self, direct_vm, treasury, direct_owner):
+        direct_vm.sender = direct_owner
+        with direct_vm.expect_revert("auditor_id is required"):
+            treasury.register_trusted_auditor("!!!")  # sanitises to empty
+
+    def test_revoke_auditor(self, direct_vm, treasury, direct_owner):
+        direct_vm.sender = direct_owner
+        treasury.register_trusted_auditor("acme")
+        treasury.revoke_trusted_auditor("acme")
+        assert treasury.is_trusted_auditor("acme") is False
+
+    def test_revoke_unknown_auditor_reverts(self, direct_vm, treasury, direct_owner):
+        direct_vm.sender = direct_owner
+        with direct_vm.expect_revert("Unknown auditor"):
+            treasury.revoke_trusted_auditor("ghost")
+
+    def test_record_attestation_happy(self, direct_vm, treasury, direct_owner):
+        direct_vm.sender = direct_owner
+        treasury.register_trusted_auditor(AUDITOR_ID)
+        treasury.record_audit_attestation(AUDIT_UID, GH_URL, AUDITOR_ID, REPORT_HASH)
+        rec = treasury.get_audit_attestation(AUDIT_UID)
+        assert rec["owner"] == OWNER
+        assert rec["repo"] == REPO
+        assert rec["auditor_id"] == AUDITOR_ID
+        assert rec["report_hash"] == REPORT_HASH
+        assert rec["status"] == "active"
+
+    def test_record_attestation_untrusted_auditor_reverts(self, direct_vm, treasury, direct_owner):
+        direct_vm.sender = direct_owner
+        with direct_vm.expect_revert("not a trusted active auditor"):
+            treasury.record_audit_attestation(AUDIT_UID, GH_URL, "nobody", REPORT_HASH)
+
+    def test_record_attestation_bad_hash_reverts(self, direct_vm, treasury, direct_owner):
+        direct_vm.sender = direct_owner
+        treasury.register_trusted_auditor(AUDITOR_ID)
+        with direct_vm.expect_revert("64-char sha256 hex"):
+            treasury.record_audit_attestation(AUDIT_UID, GH_URL, AUDITOR_ID, "deadbeef")
+
+    def test_record_duplicate_uid_reverts(self, direct_vm, treasury, direct_owner):
+        direct_vm.sender = direct_owner
+        treasury.register_trusted_auditor(AUDITOR_ID)
+        treasury.record_audit_attestation(AUDIT_UID, GH_URL, AUDITOR_ID, REPORT_HASH)
+        with direct_vm.expect_revert("already exists"):
+            treasury.record_audit_attestation(AUDIT_UID, GH_URL, AUDITOR_ID, REPORT_HASH)
+
+    def test_non_owner_record_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
+        direct_vm.sender = direct_owner
+        treasury.register_trusted_auditor(AUDITOR_ID)
+        direct_vm.sender = direct_alice
+        with direct_vm.expect_revert("Only the owner can record attestations"):
+            treasury.record_audit_attestation(AUDIT_UID, GH_URL, AUDITOR_ID, REPORT_HASH)
+
+    def test_revoke_attestation(self, direct_vm, treasury, direct_owner):
+        direct_vm.sender = direct_owner
+        treasury.register_trusted_auditor(AUDITOR_ID)
+        treasury.record_audit_attestation(AUDIT_UID, GH_URL, AUDITOR_ID, REPORT_HASH)
+        treasury.revoke_audit_attestation(AUDIT_UID)
+        assert treasury.get_audit_attestation(AUDIT_UID)["status"] == "revoked"
+
+    def test_get_unknown_attestation_reverts(self, direct_vm, treasury):
+        with direct_vm.expect_revert("Unknown attestation"):
+            treasury.get_audit_attestation("att_missing")
+
+
+# ===========================================================================
+# 8. fund_proposal
 # ===========================================================================
 
 class TestFundProposal:
     def test_full_fund_lifecycle(self, direct_vm, treasury, direct_owner, direct_alice):
-        """Submit → evaluate (APPROVED, TIER_3) → deposit → fund → FUNDED."""
+        """Submit -> evaluate (APPROVED, TIER_3) -> deposit -> fund -> FUNDED."""
         pid = submit_and_evaluate(
             direct_vm, treasury, direct_alice,
             request=5_000 * ATTO,
-            spdx="MIT", commit_count=50,  # ACTIVE → TIER_3 with MIT
+            spdx="MIT", commit_count=50,  # ACTIVE + MIT -> TIER_2
         )
         direct_vm.sender = direct_owner
         treasury.deposit(5_000 * ATTO)
@@ -400,34 +561,28 @@ class TestFundProposal:
         assert p["status"] == "FUNDED"
         assert treasury.get_treasury_balance() == 0
 
-    def test_fund_caps_at_tier_ceiling(self, direct_vm, treasury, direct_owner, direct_alice):
-        """When requested > cap, allocated = cap."""
-        # ACTIVE + no-OSI → TIER_3, ceiling = CAP_3; request more
+    def test_fund_caps_at_tier_ceiling(self, direct_vm, treasury, direct_alice):
+        """When requested > cap, allocated = cap. ACTIVE + non-OSI -> TIER_3."""
         pid = submit_and_evaluate(
             direct_vm, treasury, direct_alice,
             request=50_000 * ATTO,        # > CAP_3
-            spdx="PROPRIETARY", commit_count=50,  # ACTIVE + non-OSI → TIER_3
+            spdx="PROPRIETARY", commit_count=50,
         )
         p = treasury.get_proposal(pid)
         assert p["tier"] == "TIER_3"
-        assert p["allocated_amount"] == CAP_3  # capped
+        assert p["allocated_amount"] == CAP_3
 
-    def test_fund_within_cap_uses_requested(self, direct_vm, treasury, direct_owner, direct_alice):
-        """When requested <= cap, allocated = requested."""
+    def test_fund_within_cap_uses_requested(self, direct_vm, treasury, direct_alice):
         request = 3_000 * ATTO   # < CAP_3
         pid = submit_and_evaluate(
             direct_vm, treasury, direct_alice,
-            request=request,
-            spdx="MIT", commit_count=50,
+            request=request, spdx="PROPRIETARY", commit_count=50,  # TIER_3
         )
         p = treasury.get_proposal(pid)
         assert p["allocated_amount"] == request
 
     def test_non_owner_fund_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
-        pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            spdx="MIT", commit_count=50,
-        )
+        pid = submit_and_evaluate(direct_vm, treasury, direct_alice, spdx="MIT", commit_count=50)
         direct_vm.sender = direct_owner
         treasury.deposit(2_000 * ATTO)
         direct_vm.sender = direct_alice
@@ -440,10 +595,7 @@ class TestFundProposal:
             treasury.fund_proposal("prop_999")
 
     def test_fund_rejected_proposal_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
-        pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            decision="REJECTED",
-        )
+        pid = submit_and_evaluate(direct_vm, treasury, direct_alice, decision="REJECTED")
         direct_vm.sender = direct_owner
         treasury.deposit(1_000 * ATTO)
         with direct_vm.expect_revert("expected APPROVED"):
@@ -452,21 +604,17 @@ class TestFundProposal:
     def test_fund_insufficient_balance_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
         request = 5_000 * ATTO
         pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            request=request,
-            spdx="MIT", commit_count=50,
+            direct_vm, treasury, direct_alice, request=request, spdx="MIT", commit_count=50,
         )
         direct_vm.sender = direct_owner
-        treasury.deposit(1 * ATTO)  # far less than requested
+        treasury.deposit(1 * ATTO)
         with direct_vm.expect_revert("Insufficient treasury"):
             treasury.fund_proposal(pid)
 
     def test_double_fund_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
         request = 2_000 * ATTO
         pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            request=request,
-            spdx="MIT", commit_count=50,
+            direct_vm, treasury, direct_alice, request=request, spdx="MIT", commit_count=50,
         )
         direct_vm.sender = direct_owner
         treasury.deposit(10_000 * ATTO)
@@ -476,7 +624,7 @@ class TestFundProposal:
 
 
 # ===========================================================================
-# 8. evaluate_proposal – revert paths
+# 9. evaluate_proposal - revert paths
 # ===========================================================================
 
 class TestEvaluateProposalReverts:
@@ -485,20 +633,14 @@ class TestEvaluateProposalReverts:
             treasury.evaluate_proposal("prop_999")
 
     def test_already_approved_reverts(self, direct_vm, treasury, direct_alice):
-        pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            spdx="MIT", commit_count=50,
-        )
+        pid = submit_and_evaluate(direct_vm, treasury, direct_alice, spdx="MIT", commit_count=50)
         setup_evaluate_mocks(direct_vm)
         with direct_vm.expect_revert("is not PENDING"):
             treasury.evaluate_proposal(pid)
         direct_vm.clear_mocks()
 
     def test_already_rejected_reverts(self, direct_vm, treasury, direct_alice):
-        pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            decision="REJECTED",
-        )
+        pid = submit_and_evaluate(direct_vm, treasury, direct_alice, decision="REJECTED")
         setup_evaluate_mocks(direct_vm)
         with direct_vm.expect_revert("is not PENDING"):
             treasury.evaluate_proposal(pid)
@@ -534,6 +676,7 @@ class TestEvaluateProposalReverts:
         mock_repo(direct_vm)
         mock_commits(direct_vm, count=50)
         mock_contents(direct_vm)
+        mock_audit_manifest(direct_vm, present=False)
         direct_vm.mock_llm(LLM_ANCHOR, json.dumps({"decision": "MAYBE", "reasoning": "Uncertain"}))
         with direct_vm.expect_revert("[LLM_ERROR]"):
             treasury.evaluate_proposal(pid)
@@ -541,14 +684,13 @@ class TestEvaluateProposalReverts:
 
 
 # ===========================================================================
-# 9. evaluate_proposal – APPROVED happy paths
+# 10. evaluate_proposal - APPROVED happy paths
 # ===========================================================================
 
 class TestEvaluateProposalApproved:
     def test_approved_sets_status_and_fields(self, direct_vm, treasury, direct_alice):
         pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            spdx="MIT", commit_count=50,  # ACTIVE + MIT (OSI) → TIER_2
+            direct_vm, treasury, direct_alice, spdx="MIT", commit_count=50,  # ACTIVE + MIT -> TIER_2
         )
         p = treasury.get_proposal(pid)
         assert p["status"] == "APPROVED"
@@ -558,10 +700,7 @@ class TestEvaluateProposalApproved:
         assert p["evaluation_decision"] == "APPROVED"
 
     def test_rejected_sets_status_and_zero_allocation(self, direct_vm, treasury, direct_alice):
-        pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            decision="REJECTED",
-        )
+        pid = submit_and_evaluate(direct_vm, treasury, direct_alice, decision="REJECTED")
         p = treasury.get_proposal(pid)
         assert p["status"] == "REJECTED"
         assert p["tier"] == ""
@@ -577,267 +716,318 @@ class TestEvaluateProposalApproved:
     def test_reasoning_stored(self, direct_vm, treasury, direct_alice):
         reason = "Meets the ACTIVE commit and OSI requirements from clause 2."
         pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            spdx="MIT", commit_count=50,
-            reasoning=reason,
+            direct_vm, treasury, direct_alice, spdx="MIT", commit_count=50, reasoning=reason,
         )
         p = treasury.get_proposal(pid)
         assert p["evaluation_reasoning"] == reason
 
     def test_license_spdx_stored(self, direct_vm, treasury, direct_alice):
         pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            spdx="Apache-2.0", commit_count=50,
+            direct_vm, treasury, direct_alice, spdx="Apache-2.0", commit_count=50,
         )
         p = treasury.get_proposal(pid)
         assert p["license_spdx"] == "Apache-2.0"
 
 
 # ===========================================================================
-# 10. Tier assignment — all _compute_tier branches
+# 11. Tier assignment - all _compute_tier branches (incl. anti-gaming gates)
 # ===========================================================================
 
 class TestTierAssignment:
-    """
-    _compute_tier(bracket, osi, audit):
-      VETERAN/MATURE + osi + audit  → TIER_1
-      VETERAN/MATURE + osi or audit → TIER_2
-      VETERAN/MATURE + neither      → TIER_3
-      ACTIVE  + osi                 → TIER_2
-      ACTIVE  + no osi              → TIER_3
-      MINIMAL                       → TIER_3
-      NONE                          → ""
-    """
-
-    def _eval(self, direct_vm, treasury, direct_alice,
-              commit_count, veteran, spdx, contents=None, topics=None):
-        pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice,
-            commit_count=commit_count, veteran=veteran,
-            spdx=spdx, contents=contents, topics=topics,
-        )
+    def _eval(self, direct_vm, treasury, direct_alice, **kwargs):
+        pid = submit_and_evaluate(direct_vm, treasury, direct_alice, **kwargs)
         return treasury.get_proposal(pid)
 
-    def test_veteran_osi_audit_is_tier1(self, direct_vm, treasury, direct_alice):
-        audit_dir = [{"name": "audits", "type": "dir"}]
+    def test_veteran_osi_audit_is_tier1(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
         p = self._eval(direct_vm, treasury, direct_alice,
-                       commit_count=100, veteran=True,
-                       spdx="MIT", contents=audit_dir)
+                       commit_count=100, veteran=True, spdx="MIT", audit_present=True)
         assert p["tier"] == "TIER_1"
         assert p["commit_bracket"] == "VETERAN"
         assert p["has_audit"] == "true"
 
-    def test_mature_osi_audit_is_tier1(self, direct_vm, treasury, direct_alice):
-        audit_dir = [{"name": "audits", "type": "dir"}]
-        # MATURE: page1=100 items, probe returns empty → MATURE
+    def test_mature_osi_audit_is_tier1(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
         p = self._eval(direct_vm, treasury, direct_alice,
-                       commit_count=100, veteran=False,
-                       spdx="MIT", contents=audit_dir)
+                       commit_count=100, veteran=False, spdx="MIT", audit_present=True)
         assert p["tier"] == "TIER_1"
         assert p["commit_bracket"] == "MATURE"
 
     def test_veteran_osi_no_audit_is_tier2(self, direct_vm, treasury, direct_alice):
         p = self._eval(direct_vm, treasury, direct_alice,
-                       commit_count=100, veteran=True,
-                       spdx="MIT", contents=[])
+                       commit_count=100, veteran=True, spdx="MIT", audit_present=False)
         assert p["tier"] == "TIER_2"
 
-    def test_veteran_audit_no_osi_is_tier2(self, direct_vm, treasury, direct_alice):
-        audit_file = [{"name": "audit.pdf", "type": "file"}]
+    def test_veteran_audit_no_osi_is_tier2(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
         p = self._eval(direct_vm, treasury, direct_alice,
-                       commit_count=100, veteran=True,
-                       spdx="PROPRIETARY",  # not OSI
-                       contents=audit_file)
+                       commit_count=100, veteran=True, spdx="PROPRIETARY", audit_present=True)
         assert p["tier"] == "TIER_2"
         assert p["is_osi_approved"] == "false"
 
     def test_veteran_neither_osi_nor_audit_is_tier3(self, direct_vm, treasury, direct_alice):
         p = self._eval(direct_vm, treasury, direct_alice,
-                       commit_count=100, veteran=True,
-                       spdx="PROPRIETARY", contents=[])
+                       commit_count=100, veteran=True, spdx="PROPRIETARY", audit_present=False)
         assert p["tier"] == "TIER_3"
 
     def test_active_osi_is_tier2(self, direct_vm, treasury, direct_alice):
         p = self._eval(direct_vm, treasury, direct_alice,
-                       commit_count=50, veteran=False,
-                       spdx="MIT", contents=[])
+                       commit_count=50, veteran=False, spdx="MIT")
         assert p["tier"] == "TIER_2"
         assert p["commit_bracket"] == "ACTIVE"
 
     def test_active_no_osi_is_tier3(self, direct_vm, treasury, direct_alice):
         p = self._eval(direct_vm, treasury, direct_alice,
-                       commit_count=50, veteran=False,
-                       spdx="PROPRIETARY", contents=[])
+                       commit_count=50, veteran=False, spdx="PROPRIETARY")
         assert p["tier"] == "TIER_3"
 
     def test_minimal_is_tier3_regardless(self, direct_vm, treasury, direct_alice):
         p = self._eval(direct_vm, treasury, direct_alice,
-                       commit_count=5, veteran=False,
-                       spdx="MIT", contents=[])
+                       commit_count=5, veteran=False, spdx="MIT")
         assert p["tier"] == "TIER_3"
         assert p["commit_bracket"] == "MINIMAL"
 
-    def test_rejected_always_has_empty_tier(self, direct_vm, treasury, direct_alice):
+    def test_rejected_always_has_empty_tier(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
         pid = submit_and_evaluate(
             direct_vm, treasury, direct_alice,
-            commit_count=100, veteran=True, spdx="MIT",
-            contents=[{"name": "audits", "type": "dir"}],
-            decision="REJECTED",
+            commit_count=100, veteran=True, spdx="MIT", audit_present=True, decision="REJECTED",
         )
         p = treasury.get_proposal(pid)
         assert p["tier"] == ""
         assert p["allocated_amount"] == 0
 
+    def test_tier1_requires_onchain_audit_not_just_manifest(self, direct_vm, treasury, direct_alice):
+        """A published manifest with NO matching on-chain attestation -> audit stays false -> TIER_2."""
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=100, veteran=True, spdx="MIT", audit_present=True)
+        assert p["has_audit"] == "false"
+        assert p["tier"] == "TIER_2"
+
 
 # ===========================================================================
-# 11. Commit bracket detection
+# 12. Anti-gaming gates: quality + contributor
+# ===========================================================================
+
+class TestAntiGamingGates:
+    def _eval(self, direct_vm, treasury, direct_alice, **kwargs):
+        pid = submit_and_evaluate(direct_vm, treasury, direct_alice, **kwargs)
+        return treasury.get_proposal(pid)
+
+    def test_no_structural_quality_blocks_funding(self, direct_vm, treasury, direct_alice):
+        """VETERAN + OSI but zero structural signals -> QUALITY_NONE -> no tier -> REJECTED."""
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=100, veteran=True, spdx="MIT",
+                       contents=[{"name": "README.md", "type": "file"}])
+        assert p["quality_bracket"] == "QUALITY_NONE"
+        assert p["tier"] == ""
+        assert p["status"] == "REJECTED"
+
+    def test_basic_quality_allows_tier3(self, direct_vm, treasury, direct_alice):
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, veteran=False, spdx="PROPRIETARY",
+                       contents=[{"name": "package.json", "type": "file"}])
+        assert p["quality_bracket"] == "QUALITY_BASIC"
+        assert p["tier"] == "TIER_3"
+
+    def test_standard_quality_bracket(self, direct_vm, treasury, direct_alice):
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, spdx="MIT",
+                       contents=[{"name": "tests", "type": "dir"},
+                                 {"name": "package.json", "type": "file"}])
+        assert p["quality_bracket"] == "QUALITY_STANDARD"
+
+    def test_bot_only_history_blocks_funding(self, direct_vm, treasury, direct_alice):
+        """All-bot commit history -> CONTRIB_BOT -> no tier even if everything else is strong."""
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=100, veteran=True, spdx="MIT", bots=True)
+        assert p["contributor_bracket"] == "CONTRIB_BOT"
+        assert p["tier"] == ""
+        assert p["status"] == "REJECTED"
+
+    def test_solo_contributor_cannot_reach_tier1(self, direct_vm, treasury, direct_owner, direct_alice):
+        """A single human author caps a VETERAN+OSI+audit repo at TIER_2, never TIER_1."""
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=100, veteran=True, spdx="MIT", audit_present=True,
+                       authors=("solo",))
+        assert p["contributor_bracket"] == "CONTRIB_SOLO"
+        assert p["has_audit"] == "true"
+        assert p["tier"] == "TIER_2"
+
+    def test_small_team_reaches_tier1(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=100, veteran=True, spdx="MIT", audit_present=True,
+                       authors=("x", "y", "z"))
+        assert p["contributor_bracket"] == "CONTRIB_SMALL"
+        assert p["tier"] == "TIER_1"
+
+
+# ===========================================================================
+# 13. Commit + contributor bracket detection
 # ===========================================================================
 
 class TestCommitBrackets:
-    def _get_bracket(self, direct_vm, treasury, direct_alice,
-                     count, veteran=False, page1_status=200):
+    def _get(self, direct_vm, treasury, direct_alice, count, veteran=False,
+             page1_status=200, authors=DEFAULT_AUTHORS, bots=False):
         vm = direct_vm
         vm.sender = direct_alice
         pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
         mock_repo(vm)
-        mock_commits(vm, count=count, veteran=veteran, page1_status=page1_status)
+        mock_commits(vm, count=count, veteran=veteran, page1_status=page1_status,
+                     authors=authors, bots=bots)
         mock_contents(vm)
+        mock_audit_manifest(vm, present=False)
         mock_llm(vm)
         treasury.evaluate_proposal(pid)
         vm.clear_mocks()
-        return treasury.get_proposal(pid)["commit_bracket"]
+        return treasury.get_proposal(pid)
 
     def test_none_bracket_from_empty_repo_409(self, direct_vm, treasury, direct_alice):
-        bracket = self._get_bracket(direct_vm, treasury, direct_alice,
-                                    count=1, page1_status=409)
-        assert bracket == "NONE"
+        p = self._get(direct_vm, treasury, direct_alice, count=1, page1_status=409)
+        assert p["commit_bracket"] == "NONE"
+        assert p["contributor_bracket"] == "CONTRIB_NONE"
 
     def test_minimal_bracket(self, direct_vm, treasury, direct_alice):
-        bracket = self._get_bracket(direct_vm, treasury, direct_alice, count=5)
-        assert bracket == "MINIMAL"
+        assert self._get(direct_vm, treasury, direct_alice, count=5)["commit_bracket"] == "MINIMAL"
 
     def test_active_bracket(self, direct_vm, treasury, direct_alice):
-        bracket = self._get_bracket(direct_vm, treasury, direct_alice, count=50)
-        assert bracket == "ACTIVE"
+        assert self._get(direct_vm, treasury, direct_alice, count=50)["commit_bracket"] == "ACTIVE"
 
     def test_mature_bracket_probe_empty(self, direct_vm, treasury, direct_alice):
-        """100 page-1 items + empty probe → MATURE."""
-        bracket = self._get_bracket(direct_vm, treasury, direct_alice,
-                                    count=100, veteran=False)
-        assert bracket == "MATURE"
+        assert self._get(direct_vm, treasury, direct_alice,
+                         count=100, veteran=False)["commit_bracket"] == "MATURE"
 
     def test_veteran_bracket_probe_non_empty(self, direct_vm, treasury, direct_alice):
-        """100 page-1 items + non-empty probe → VETERAN."""
-        bracket = self._get_bracket(direct_vm, treasury, direct_alice,
-                                    count=100, veteran=True)
-        assert bracket == "VETERAN"
+        assert self._get(direct_vm, treasury, direct_alice,
+                         count=100, veteran=True)["commit_bracket"] == "VETERAN"
 
     def test_single_commit_is_minimal(self, direct_vm, treasury, direct_alice):
-        bracket = self._get_bracket(direct_vm, treasury, direct_alice, count=1)
-        assert bracket == "MINIMAL"
+        assert self._get(direct_vm, treasury, direct_alice, count=1)["commit_bracket"] == "MINIMAL"
 
     def test_boundary_99_is_active(self, direct_vm, treasury, direct_alice):
-        bracket = self._get_bracket(direct_vm, treasury, direct_alice, count=99)
-        assert bracket == "ACTIVE"
+        assert self._get(direct_vm, treasury, direct_alice, count=99)["commit_bracket"] == "ACTIVE"
+
+    def test_solo_contributor(self, direct_vm, treasury, direct_alice):
+        p = self._get(direct_vm, treasury, direct_alice, count=10, authors=("only",))
+        assert p["contributor_bracket"] == "CONTRIB_SOLO"
+
+    def test_team_contributor(self, direct_vm, treasury, direct_alice):
+        p = self._get(direct_vm, treasury, direct_alice, count=20,
+                      authors=("a", "b", "c", "d", "e"))
+        assert p["contributor_bracket"] == "CONTRIB_TEAM"
+
+    def test_bot_contributor(self, direct_vm, treasury, direct_alice):
+        p = self._get(direct_vm, treasury, direct_alice, count=20, bots=True)
+        assert p["contributor_bracket"] == "CONTRIB_BOT"
 
 
 # ===========================================================================
-# 12. Audit detection
+# 14. On-chain audit verification + fail-closed cases
 # ===========================================================================
 
-class TestAuditDetection:
-    def _check_audit(self, direct_vm, treasury, direct_alice,
-                     topics=None, contents=None):
-        vm = direct_vm
-        vm.sender = direct_alice
-        pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
-        mock_repo(vm, topics=topics)
-        mock_commits(vm, count=50)
-        mock_contents(vm, items=contents)
-        mock_llm(vm)
-        treasury.evaluate_proposal(pid)
-        vm.clear_mocks()
-        return treasury.get_proposal(pid)["has_audit"]
+class TestAuditVerification:
+    def _eval(self, direct_vm, treasury, direct_alice, **kwargs):
+        pid = submit_and_evaluate(direct_vm, treasury, direct_alice, **kwargs)
+        return treasury.get_proposal(pid)
 
-    def test_audit_detected_via_topic(self, direct_vm, treasury, direct_alice):
-        has = self._check_audit(direct_vm, treasury, direct_alice,
-                                topics=["audited", "defi"])
-        assert has == "true"
+    def test_valid_attestation_sets_audit_true(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, spdx="MIT", audit_present=True)
+        assert p["has_audit"] == "true"
+        assert p["audit_uid"] == AUDIT_UID
 
-    def test_audit_detected_via_audits_dir(self, direct_vm, treasury, direct_alice):
-        has = self._check_audit(direct_vm, treasury, direct_alice,
-                                contents=[{"name": "audits", "type": "dir"}])
-        assert has == "true"
+    def test_no_manifest_is_no_audit(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, spdx="MIT", audit_present=False)
+        assert p["has_audit"] == "false"
 
-    def test_audit_detected_via_audit_file(self, direct_vm, treasury, direct_alice):
-        has = self._check_audit(direct_vm, treasury, direct_alice,
-                                contents=[{"name": "audit.pdf", "type": "file"}])
-        assert has == "true"
+    def test_manifest_without_onchain_record_is_no_audit(self, direct_vm, treasury, direct_alice):
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, spdx="MIT", audit_present=True)  # no on-chain record
+        assert p["has_audit"] == "false"
 
-    def test_security_dir_detected_as_audit(self, direct_vm, treasury, direct_alice):
-        has = self._check_audit(direct_vm, treasury, direct_alice,
-                                contents=[{"name": "security.md", "type": "file"}])
-        assert has == "true"
+    def test_report_hash_mismatch_is_no_audit(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        # Serve a report whose bytes do NOT hash to the attested value.
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, spdx="MIT", audit_present=True,
+                       audit_report_text="tampered report body")
+        assert p["has_audit"] == "false"
 
-    def test_no_audit_when_empty_topics_and_contents(self, direct_vm, treasury, direct_alice):
-        has = self._check_audit(direct_vm, treasury, direct_alice,
-                                topics=[], contents=[{"name": "README.md", "type": "file"}])
-        assert has == "false"
+    def test_revoked_attestation_is_no_audit(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        direct_vm.sender = direct_owner
+        treasury.revoke_audit_attestation(AUDIT_UID)
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, spdx="MIT", audit_present=True)
+        assert p["has_audit"] == "false"
 
-    def test_contents_api_failure_is_no_audit(self, direct_vm, treasury, direct_alice):
-        """A non-200 contents response is treated as 'no audit' (conservative)."""
-        vm = direct_vm
-        vm.sender = direct_alice
-        pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
-        mock_repo(vm)
-        mock_commits(vm, count=50)
-        mock_contents(vm, status=500)
-        mock_llm(vm)
-        treasury.evaluate_proposal(pid)
-        vm.clear_mocks()
-        p = treasury.get_proposal(pid)
+    def test_revoked_auditor_is_no_audit(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        direct_vm.sender = direct_owner
+        treasury.revoke_trusted_auditor(AUDITOR_ID)
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, spdx="MIT", audit_present=True)
+        assert p["has_audit"] == "false"
+
+    def test_attestation_bound_to_other_repo_is_no_audit(self, direct_vm, treasury, direct_owner, direct_alice):
+        # Attestation recorded for a different repo than the proposal's repo.
+        setup_onchain_audit(treasury, direct_vm, direct_owner,
+                            github_url="https://github.com/test-owner/other-repo")
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, spdx="MIT", audit_present=True)
+        assert p["has_audit"] == "false"
+
+    def test_missing_report_file_is_no_audit(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        p = self._eval(direct_vm, treasury, direct_alice,
+                       commit_count=50, spdx="MIT", audit_present=True, audit_report_status=404)
         assert p["has_audit"] == "false"
 
 
 # ===========================================================================
-# 13. GitHub API error classification
+# 15. GitHub API error classification
 # ===========================================================================
 
 class TestGitHubErrorClassification:
-    def _submit_and_get_pid(self, direct_vm, treasury, direct_alice):
+    def _pid(self, direct_vm, treasury, direct_alice):
         direct_vm.sender = direct_alice
         return treasury.submit_proposal(GH_URL, 1_000 * ATTO)
 
     def test_repo_404_is_external(self, direct_vm, treasury, direct_alice):
-        pid = self._submit_and_get_pid(direct_vm, treasury, direct_alice)
+        pid = self._pid(direct_vm, treasury, direct_alice)
         mock_repo(direct_vm, status=404)
         with direct_vm.expect_revert("[EXTERNAL]"):
             treasury.evaluate_proposal(pid)
         direct_vm.clear_mocks()
 
     def test_repo_403_is_transient(self, direct_vm, treasury, direct_alice):
-        pid = self._submit_and_get_pid(direct_vm, treasury, direct_alice)
+        pid = self._pid(direct_vm, treasury, direct_alice)
         mock_repo(direct_vm, status=403)
         with direct_vm.expect_revert("[TRANSIENT]"):
             treasury.evaluate_proposal(pid)
         direct_vm.clear_mocks()
 
     def test_repo_429_is_transient(self, direct_vm, treasury, direct_alice):
-        pid = self._submit_and_get_pid(direct_vm, treasury, direct_alice)
+        pid = self._pid(direct_vm, treasury, direct_alice)
         mock_repo(direct_vm, status=429)
         with direct_vm.expect_revert("[TRANSIENT]"):
             treasury.evaluate_proposal(pid)
         direct_vm.clear_mocks()
 
     def test_repo_500_is_transient(self, direct_vm, treasury, direct_alice):
-        pid = self._submit_and_get_pid(direct_vm, treasury, direct_alice)
+        pid = self._pid(direct_vm, treasury, direct_alice)
         mock_repo(direct_vm, status=500)
         with direct_vm.expect_revert("[TRANSIENT]"):
             treasury.evaluate_proposal(pid)
         direct_vm.clear_mocks()
 
     def test_commits_404_is_external(self, direct_vm, treasury, direct_alice):
-        pid = self._submit_and_get_pid(direct_vm, treasury, direct_alice)
+        pid = self._pid(direct_vm, treasury, direct_alice)
         mock_repo(direct_vm)
         mock_commits(direct_vm, count=1, page1_status=404)
         with direct_vm.expect_revert("[EXTERNAL]"):
@@ -845,7 +1035,7 @@ class TestGitHubErrorClassification:
         direct_vm.clear_mocks()
 
     def test_commits_500_is_transient(self, direct_vm, treasury, direct_alice):
-        pid = self._submit_and_get_pid(direct_vm, treasury, direct_alice)
+        pid = self._pid(direct_vm, treasury, direct_alice)
         mock_repo(direct_vm)
         mock_commits(direct_vm, count=1, page1_status=500)
         with direct_vm.expect_revert("[TRANSIENT]"):
@@ -854,163 +1044,92 @@ class TestGitHubErrorClassification:
 
 
 # ===========================================================================
-# 14. Determinism simulation
-#
-# Simulates three independent validator nodes all receiving identical inputs
-# and verifies they each produce exactly the same outcome.  Uses snapshot/
-# revert to re-run the same evaluate_proposal call from a clean slate.
+# 16. Determinism simulation
 # ===========================================================================
 
 class TestDeterminismSimulation:
-    """
-    Determinism principle: identical external inputs MUST yield identical
-    on-chain state changes across all validator nodes.
+    CONSENSUS_FIELDS = ("status", "tier", "commit_bracket", "contributor_bracket",
+                        "quality_bracket", "is_osi_approved", "has_audit")
 
-    We simulate this by:
-      1. Snapshotting contract state before evaluation.
-      2. Running evaluate_proposal with a fixed mock set → record result.
-      3. Reverting to the snapshot.
-      4. Re-running with the same mock set → compare result.
-
-    All fields that are part of the consensus check (decision, tier,
-    commit_bracket, is_osi_approved, has_audit) must be identical.
-    """
-
-    MOCKS = dict(
-        spdx="MIT",
-        commit_count=100,
-        veteran=True,
-        contents=[{"name": "audits", "type": "dir"}],
-        decision="APPROVED",
-    )
-
-    def _run_once(self, direct_vm, treasury, direct_alice, pid):
-        """Register mocks, evaluate, clear, return proposal dict."""
-        setup_evaluate_mocks(direct_vm, **self.MOCKS)
+    def _run_once(self, direct_vm, treasury, pid, **mocks):
+        setup_evaluate_mocks(direct_vm, **mocks)
         treasury.evaluate_proposal(pid)
         direct_vm.clear_mocks()
         return treasury.get_proposal(pid)
 
-    def test_two_nodes_produce_identical_tier1_result(
-        self, direct_vm, treasury, direct_alice
-    ):
+    def test_two_nodes_produce_identical_tier1_result(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        mocks = dict(spdx="MIT", commit_count=100, veteran=True, audit_present=True, decision="APPROVED")
         direct_vm.sender = direct_alice
         pid = treasury.submit_proposal(GH_URL, 5_000 * ATTO)
-
         snap = direct_vm.snapshot()
-
-        result_node_a = self._run_once(direct_vm, treasury, direct_alice, pid)
-
+        a = self._run_once(direct_vm, treasury, pid, **mocks)
         direct_vm.revert(snap)
+        b = self._run_once(direct_vm, treasury, pid, **mocks)
+        for f in self.CONSENSUS_FIELDS:
+            assert a[f] == b[f], f"Nodes diverged on {f!r}: {a[f]!r} vs {b[f]!r}"
+        assert a["tier"] == "TIER_1"
 
-        result_node_b = self._run_once(direct_vm, treasury, direct_alice, pid)
-
-        for field in ("status", "tier", "commit_bracket", "is_osi_approved", "has_audit"):
-            assert result_node_a[field] == result_node_b[field], (
-                f"Nodes diverged on '{field}': "
-                f"node_a={result_node_a[field]!r}, node_b={result_node_b[field]!r}"
-            )
-
-    def test_three_node_consensus_all_identical(
-        self, direct_vm, treasury, direct_alice
-    ):
+    def test_three_node_consensus_all_identical(self, direct_vm, treasury, direct_owner, direct_alice):
+        setup_onchain_audit(treasury, direct_vm, direct_owner)
+        mocks = dict(spdx="MIT", commit_count=100, veteran=True, audit_present=True, decision="APPROVED")
         direct_vm.sender = direct_alice
         pid = treasury.submit_proposal(GH_URL, 5_000 * ATTO)
         snap = direct_vm.snapshot()
-
         results = []
         for _ in range(3):
             direct_vm.revert(snap)
-            results.append(self._run_once(direct_vm, treasury, direct_alice, pid))
+            results.append(self._run_once(direct_vm, treasury, pid, **mocks))
+        for f in self.CONSENSUS_FIELDS:
+            assert len({r[f] for r in results}) == 1, f"Diverged on {f!r}"
 
-        consensus_fields = ("status", "tier", "commit_bracket", "is_osi_approved", "has_audit")
-        for field in consensus_fields:
-            values = {r[field] for r in results}
-            assert len(values) == 1, (
-                f"Three-node consensus failed on '{field}': got {values}"
-            )
-
-    def test_rejected_decision_deterministic_across_nodes(
-        self, direct_vm, treasury, direct_alice
-    ):
-        rejected_mocks = dict(
-            spdx="MIT", commit_count=50, veteran=False,
-            contents=[], decision="REJECTED",
-        )
+    def test_rejected_decision_deterministic_across_nodes(self, direct_vm, treasury, direct_alice):
+        mocks = dict(spdx="MIT", commit_count=50, veteran=False, decision="REJECTED")
         direct_vm.sender = direct_alice
         pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
         snap = direct_vm.snapshot()
-
         results = []
         for _ in range(3):
             direct_vm.revert(snap)
-            setup_evaluate_mocks(direct_vm, **rejected_mocks)
-            treasury.evaluate_proposal(pid)
-            direct_vm.clear_mocks()
-            results.append(treasury.get_proposal(pid))
-
-        for field in ("status", "tier", "commit_bracket", "is_osi_approved", "has_audit"):
-            values = {r[field] for r in results}
-            assert len(values) == 1, f"Diverged on '{field}': {values}"
+            results.append(self._run_once(direct_vm, treasury, pid, **mocks))
+        for f in self.CONSENSUS_FIELDS:
+            assert len({r[f] for r in results}) == 1, f"Diverged on {f!r}"
 
     def test_pure_tier_computation_is_deterministic(self):
-        """
-        _compute_tier is pure Python with no LLM or network calls.
-        Verify its output is stable for all bracket × osi × audit combinations.
-        """
-        from itertools import product
-
-        brackets = ["NONE", "MINIMAL", "ACTIVE", "MATURE", "VETERAN"]
-        expected = {
-            # (bracket, osi, audit) → tier
-            ("VETERAN", True,  True):  "TIER_1",
-            ("MATURE",  True,  True):  "TIER_1",
-            ("VETERAN", True,  False): "TIER_2",
-            ("VETERAN", False, True):  "TIER_2",
-            ("MATURE",  True,  False): "TIER_2",
-            ("MATURE",  False, True):  "TIER_2",
-            ("VETERAN", False, False): "TIER_3",
-            ("MATURE",  False, False): "TIER_3",
-            ("ACTIVE",  True,  True):  "TIER_2",
-            ("ACTIVE",  True,  False): "TIER_2",
-            ("ACTIVE",  False, True):  "TIER_3",
-            ("ACTIVE",  False, False): "TIER_3",
-            ("MINIMAL", True,  True):  "TIER_3",
-            ("MINIMAL", True,  False): "TIER_3",
-            ("MINIMAL", False, True):  "TIER_3",
-            ("MINIMAL", False, False): "TIER_3",
-            ("NONE",    True,  True):  "",
-            ("NONE",    True,  False): "",
-            ("NONE",    False, True):  "",
-            ("NONE",    False, False): "",
-        }
-
-        # Import the pure function via contract module path
-        import sys
-        import importlib.util
-        from pathlib import Path
-
-        spec = importlib.util.spec_from_file_location(
-            "_lexi_pure",
-            Path(__file__).parent.parent / "contracts" / "lexitreasury.py",
-        )
-
-        # We cannot import the full contract (needs genlayer), but we can
-        # validate all 20 cases using the in-process evaluate results above.
-        # This test instead validates expected values as a lookup table.
-        for (bracket, osi, audit), tier in expected.items():
-            # Derive tier from first-principles logic (mirrors _compute_tier)
+        """Mirror of _compute_tier's decision table across the full input space."""
+        def compute(bracket, osi, audit, quality, contrib):
+            qrank = {"QUALITY_NONE": 0, "QUALITY_BASIC": 1, "QUALITY_STANDARD": 2, "QUALITY_STRONG": 3}
+            if bracket == "NONE":
+                return ""
+            if contrib == "CONTRIB_BOT":
+                return ""
+            if qrank[quality] < 1:
+                return ""
+            q_ok_t1 = qrank[quality] >= 2
+            c_ok_t1 = contrib in ("CONTRIB_SMALL", "CONTRIB_TEAM")
             if bracket in ("MATURE", "VETERAN"):
-                if osi and audit:
-                    computed = "TIER_1"
-                elif osi or audit:
-                    computed = "TIER_2"
-                else:
-                    computed = "TIER_3"
-            elif bracket == "ACTIVE":
-                computed = "TIER_2" if osi else "TIER_3"
-            elif bracket == "MINIMAL":
-                computed = "TIER_3"
-            else:
-                computed = ""
-            assert computed == tier, f"Logic mismatch for {(bracket, osi, audit)}"
+                if osi and audit and q_ok_t1 and c_ok_t1:
+                    return "TIER_1"
+                if osi or audit:
+                    return "TIER_2"
+                return "TIER_3"
+            if bracket == "ACTIVE":
+                return "TIER_2" if osi else "TIER_3"
+            return "TIER_3"
+
+        # Stability: repeated calls with identical args yield identical output.
+        for bracket in ("NONE", "MINIMAL", "ACTIVE", "MATURE", "VETERAN"):
+            for osi in (True, False):
+                for audit in (True, False):
+                    for quality in ("QUALITY_NONE", "QUALITY_BASIC", "QUALITY_STANDARD", "QUALITY_STRONG"):
+                        for contrib in ("CONTRIB_NONE", "CONTRIB_BOT", "CONTRIB_SOLO",
+                                        "CONTRIB_SMALL", "CONTRIB_TEAM"):
+                            first = compute(bracket, osi, audit, quality, contrib)
+                            assert first == compute(bracket, osi, audit, quality, contrib)
+
+        # Spot-check anti-gaming invariants.
+        assert compute("VETERAN", True, True, "QUALITY_NONE", "CONTRIB_TEAM") == ""
+        assert compute("VETERAN", True, True, "QUALITY_STRONG", "CONTRIB_BOT") == ""
+        assert compute("VETERAN", True, True, "QUALITY_STRONG", "CONTRIB_TEAM") == "TIER_1"
+        assert compute("VETERAN", True, True, "QUALITY_STRONG", "CONTRIB_SOLO") == "TIER_2"
+        assert compute("NONE", True, True, "QUALITY_STRONG", "CONTRIB_TEAM") == ""
