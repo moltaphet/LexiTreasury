@@ -1,0 +1,26 @@
+{
+  "network": "studionet",
+  "chain_id": 61999,
+  "rpc_url": "https://studio.genlayer.com/api",
+  "deployer": {
+    "name": "lexitreasury_v3_deployer",
+    "address": "0x07fa7df314d0f7e037b72760b416a77a29513988"
+  },
+  "contract": {
+    "name": "LexiTreasury",
+    "source": "contracts/lexitreasury.py",
+    "address": "0xE091479d636d716b0a3eFcdb6232Dd420d3dFbF9",
+    "deploy_tx": "0xfc999e33c6d0a49a54871c17ac8f965e5517401a1e8db2fb7dcbfe32911f8dc7",
+    "deployed_at": "2026-09-01"
+  },
+  "constructor_args": {
+    "constitution": "Projects must demonstrate active open-source development. Minimum ACTIVE commit bracket required. An OSI-approved license is mandatory for any funding. Security audits by recognized firms qualify projects for higher-tier allocations. Tier 1 requires MATURE or VETERAN activity plus both an OSI license and a completed audit. Tier 2 requires ACTIVE or better activity plus either an OSI license or an audit. Tier 3 requires MINIMAL or better activity plus any valid license. Projects with zero commits receive no allocation regardless of decision.",
+    "tier_cap_1": "10000000000000000000000",
+    "tier_cap_2": "5000000000000000000000",
+    "tier_cap_3": "1000000000000000000000"
+  },
+  "consensus": {
+    "validators_agreed": 5,
+    "validators_total": 5
+  }
+}

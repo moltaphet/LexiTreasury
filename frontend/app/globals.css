@@ -1,0 +1,446 @@
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700;800&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   Design Tokens — Light Theme
+   ============================================================ */
+:root {
+  --c-bg:          #eef2f7;
+  --c-surface:     #f8fafc;
+  --c-card:        rgba(255, 255, 255, 0.82);
+  --c-border:      rgba(203, 213, 225, 0.70);
+  --c-border-glow: rgba(8, 145, 178, 0.25);
+  --c-cyan:        #0891b2;
+  --c-cyan-dim:    #0e7490;
+  --c-indigo:      #6366f1;
+  --c-violet:      #7c3aed;
+  --c-green:       #059669;
+  --c-text:        #0f172a;
+  --c-muted:       #64748b;
+}
+
+/* ============================================================
+   Base Reset
+   ============================================================ */
+html {
+  color-scheme: light;
+}
+
+html, body {
+  background-color: var(--c-bg);
+  color: var(--c-text);
+  font-family: "Inter", system-ui, sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============================================================
+   Scrollbar — Light
+   ============================================================ */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #e2e8f0; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--c-cyan); }
+
+/* ============================================================
+   Page Background — Volumetric 3D Light
+   Multiple radial light sources create spatial depth without
+   any dark chrome. The layered halos simulate real-world
+   indirect lighting from several directions simultaneously.
+   ============================================================ */
+.page-bg {
+  background-color: #eef2f7;
+  background-image:
+    /* Top-left: cool daylight source */
+    radial-gradient(ellipse 72% 58% at 4%  4%,  rgba(186, 230, 253, 0.60) 0%, transparent 58%),
+    /* Top-right: warm ambient fill */
+    radial-gradient(ellipse 55% 42% at 96%  6%,  rgba(254, 249, 195, 0.28) 0%, transparent 52%),
+    /* Bottom-right: receding violet shadow */
+    radial-gradient(ellipse 62% 58% at 96% 96%,  rgba(221, 214, 254, 0.38) 0%, transparent 58%),
+    /* Bottom-left: mint ground bounce */
+    radial-gradient(ellipse 52% 48% at 4%  96%,  rgba(209, 250, 229, 0.26) 0%, transparent 52%),
+    /* Center: diffuse blue fill */
+    radial-gradient(ellipse 50% 52% at 50% 50%,  rgba(224, 242, 254, 0.16) 0%, transparent 65%);
+  /* Directional linear-gradient and tiled grid removed:
+     the 165deg sweep created a visible band near the viewport midpoint,
+     and the 40px-pitch grid lines could produce a heavier horizontal seam
+     at certain scroll positions. Radial halos + flat base are seamless. */
+}
+
+/* ============================================================
+   Keyframe Animations (unchanged)
+   ============================================================ */
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%       { opacity: 1; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-4px); }
+}
+
+@keyframes scanline {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes border-spin {
+  to { --border-angle: 360deg; }
+}
+
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ping-slow {
+  0%   { transform: scale(1); opacity: 0.8; }
+  70%  { transform: scale(2); opacity: 0; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+/* ============================================================
+   Animation Utilities (unchanged)
+   ============================================================ */
+.animate-glow-pulse { animation: glow-pulse 2.5s ease-in-out infinite; }
+.animate-float      { animation: float 3s ease-in-out infinite; }
+.animate-fade-up    { animation: fade-up 0.4s ease-out both; }
+.animate-ping-slow  { animation: ping-slow 2s cubic-bezier(0, 0, 0.2, 1) infinite; }
+
+/* ============================================================
+   Glass Card System — Light Theme
+   Three-layer shadow stack produces genuine floating depth:
+   close contact shadow + mid-field haze + far ambient lift.
+   ============================================================ */
+.glass {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(203, 213, 225, 0.70);
+}
+
+.glass-glow {
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(203, 213, 225, 0.65);
+  box-shadow:
+    0  1px  2px  rgba(15, 23, 42, 0.04),
+    0  4px  14px rgba(15, 23, 42, 0.06),
+    0 14px  32px rgba(15, 23, 42, 0.04),
+    0 32px  56px rgba(15, 23, 42, 0.02),
+    inset 0 1px 0 rgba(255, 255, 255, 0.98);
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.glass-glow:hover {
+  border-color: rgba(8, 145, 178, 0.28);
+  box-shadow:
+    0  2px  4px  rgba(15, 23, 42, 0.06),
+    0  6px  20px rgba(15, 23, 42, 0.08),
+    0 18px  40px rgba(15, 23, 42, 0.05),
+    0 36px  60px rgba(15, 23, 42, 0.03),
+    0  0    0 1px rgba(8, 145, 178, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 1);
+}
+
+.glass-inset {
+  background: rgba(241, 245, 249, 0.88);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(203, 213, 225, 0.60);
+  box-shadow:
+    inset 0 2px 4px rgba(15, 23, 42, 0.05),
+    inset 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+/* ============================================================
+   Gradient Text — Adjusted for Light Background
+   ============================================================ */
+.gradient-text {
+  background: linear-gradient(135deg, #0891b2 0%, #3b82f6 50%, #6366f1 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-warm {
+  background: linear-gradient(135deg, #d97706 0%, #db2777 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ============================================================
+   Neon Effects — Adapted for Light
+   Glow sigma reduced; shadows replaced with soft depth rings.
+   ============================================================ */
+.neon-border-cyan {
+  box-shadow:
+    0 0 0 1px rgba(8, 145, 178, 0.18),
+    0 2px  8px rgba(8, 145, 178, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+.neon-text-cyan {
+  color: #0891b2;
+  /* text-shadow removed — neon glow is illegible on white */
+}
+
+.glow-btn {
+  position: relative;
+  background: linear-gradient(135deg, #0891b2, #0ea5e9);
+  color: #ffffff;
+  font-weight: 700;
+  transition: all 0.2s ease;
+  box-shadow:
+    0 4px 14px rgba(8, 145, 178, 0.28),
+    0 2px  6px rgba(8, 145, 178, 0.16),
+    0 1px  2px rgba(15, 23, 42, 0.08);
+}
+
+.glow-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #0284c7, #0891b2);
+  box-shadow:
+    0 6px 20px rgba(8, 145, 178, 0.36),
+    0 3px 10px rgba(8, 145, 178, 0.22),
+    0 1px  3px rgba(15, 23, 42, 0.10);
+  transform: translateY(-1px);
+}
+
+.glow-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow:
+    0 2px  8px rgba(8, 145, 178, 0.20),
+    0 1px  3px rgba(15, 23, 42, 0.08);
+}
+
+/* ============================================================
+   Section Accent Bar
+   ============================================================ */
+.accent-bar {
+  width: 3px;
+  height: 22px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #0891b2, #6366f1);
+  box-shadow: 0 0 6px rgba(8, 145, 178, 0.30);
+  flex-shrink: 0;
+}
+
+/* ============================================================
+   Status Badges — Adapted for Light
+   Text shifted to dark shade of each hue for WCAG contrast.
+   ============================================================ */
+.badge-pending {
+  background: rgba(245, 158, 11, 0.10);
+  color: #92400e;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+}
+
+.badge-approved {
+  background: rgba(16, 185, 129, 0.10);
+  color: #065f46;
+  border: 1px solid rgba(16, 185, 129, 0.28);
+}
+
+.badge-rejected {
+  background: rgba(239, 68, 68, 0.10);
+  color: #991b1b;
+  border: 1px solid rgba(239, 68, 68, 0.28);
+}
+
+.badge-funded {
+  background: rgba(139, 92, 246, 0.10);
+  color: #4c1d95;
+  border: 1px solid rgba(139, 92, 246, 0.28);
+}
+
+/* ============================================================
+   Form Input Focus
+   ============================================================ */
+.cyber-input {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.cyber-input:focus {
+  outline: none;
+  border-color: rgba(8, 145, 178, 0.50);
+  box-shadow:
+    0 0 0 3px rgba(8, 145, 178, 0.08),
+    0 1px 4px rgba(15, 23, 42, 0.06);
+}
+
+/* ============================================================
+   Shimmer Loading Placeholder — Light
+   ============================================================ */
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(241, 245, 249, 0)    0%,
+    rgba(148, 163, 184, 0.22) 50%,
+    rgba(241, 245, 249, 0)    100%
+  );
+  background-size: 400px 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+/* ============================================================
+   Decorative — Adapted for Light
+   ============================================================ */
+.scanline::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(
+    180deg,
+    transparent 50%,
+    rgba(148, 163, 184, 0.05) 50%
+  );
+  background-size: 100% 4px;
+  pointer-events: none;
+}
+
+.edge-glow-top::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 10%;
+  right: 10%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(8, 145, 178, 0.22), transparent);
+}
+
+.flow-connector {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(8, 145, 178, 0.35), rgba(99, 102, 241, 0.28));
+  position: relative;
+}
+
+.flow-connector::after {
+  content: "";
+  position: absolute;
+  right: -4px;
+  top: -3px;
+  width: 0;
+  height: 0;
+  border-top:    4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left:   6px solid rgba(8, 145, 178, 0.45);
+}
+
+/* ============================================================
+   TAILWIND UTILITY OVERRIDES — Light Theme
+   -------------------------------------------------------
+   These rules live OUTSIDE any @layer block. Per the CSS
+   Cascade Level 5 spec, unlayered author styles always beat
+   layered ones (including @layer utilities), so no
+   !important is needed for the base overrides below.
+   Pseudo-class variants (hover:*, divide:*) are also placed
+   outside layers and therefore win at equal specificity.
+   ============================================================ */
+
+/* --- Body / html base classes (layout.tsx) --- */
+.bg-slate-950        { background-color: #f8fafc; }
+.text-slate-100      { color: #0f172a; }
+
+/* --- Text remap: light → near-black, mid → mid-dark --- */
+.text-white          { color: #0f172a; }
+.text-slate-200      { color: #1e293b; }
+.text-slate-300      { color: #1e293b; }
+.text-slate-400      { color: #334155; }
+.text-slate-500      { color: #475569; }
+.text-slate-600      { color: #64748b; }
+.text-slate-700      { color: #94a3b8; }
+.text-slate-800      { color: #cbd5e1; }
+
+/* --- Accent colors: deepened for WCAG contrast on white --- */
+.text-cyan-400       { color: #0891b2; }
+.text-cyan-300       { color: #0891b2; }
+.text-sky-400        { color: #0284c7; }
+.text-sky-300        { color: #0284c7; }
+.text-indigo-400     { color: #6366f1; }
+.text-indigo-300     { color: #6366f1; }
+.text-violet-400     { color: #7c3aed; }
+.text-violet-300     { color: #7c3aed; }
+.text-emerald-400    { color: #059669; }
+.text-emerald-300    { color: #059669; }
+.text-red-400        { color: #dc2626; }
+.text-red-300        { color: #dc2626; }
+.text-amber-400      { color: #d97706; }
+
+/* --- Background remap --- */
+.bg-slate-900        { background-color: rgba(241, 245, 249, 0.50); }
+.bg-slate-800        { background-color: rgba(226, 232, 240, 0.50); }
+
+/* Opacity variants used in Header, TabNav, table cells --- */
+.bg-slate-950\/80    { background-color: rgba(255, 255, 255, 0.88); }
+.bg-slate-950\/40    { background-color: rgba(248, 250, 252, 0.65); }
+.bg-slate-900\/80    { background-color: rgba(241, 245, 249, 0.90); }
+.bg-slate-900\/60    { background-color: rgba(241, 245, 249, 0.78); }
+.bg-slate-900\/40    { background-color: rgba(241, 245, 249, 0.55); }
+.bg-slate-800\/60    { background-color: rgba(226, 232, 240, 0.60); }
+.bg-slate-800\/50    { background-color: rgba(226, 232, 240, 0.55); }
+.bg-slate-800\/40    { background-color: rgba(226, 232, 240, 0.45); }
+.bg-slate-800\/30    { background-color: rgba(226, 232, 240, 0.38); }
+.bg-slate-800\/20    { background-color: rgba(226, 232, 240, 0.25); }
+
+/* --- Border remap --- */
+.border-slate-950    { border-color: rgba(241, 245, 249, 1); }
+.border-slate-800    { border-color: rgba(203, 213, 225, 0.70); }
+.border-slate-700    { border-color: rgba(203, 213, 225, 0.88); }
+.border-slate-600    { border-color: rgba(148, 163, 184, 0.60); }
+
+/* Opacity variants --- */
+.border-slate-800\/60 { border-color: rgba(203, 213, 225, 0.65); }
+.border-slate-800\/50 { border-color: rgba(203, 213, 225, 0.55); }
+.border-slate-800\/40 { border-color: rgba(203, 213, 225, 0.45); }
+.border-slate-800\/30 { border-color: rgba(203, 213, 225, 0.35); }
+.border-slate-700\/60 { border-color: rgba(203, 213, 225, 0.80); }
+.border-slate-700\/50 { border-color: rgba(203, 213, 225, 0.70); }
+
+/* Left-border for selected table row --- */
+.border-l-cyan-400\/40 { border-left-color: rgba(8, 145, 178, 0.45); }
+
+/* --- Divide remap (table row separators) --- */
+.divide-slate-800\/40 > :not([hidden]) ~ :not([hidden]) {
+  border-color: rgba(203, 213, 225, 0.42);
+}
+.divide-slate-800\/60 > :not([hidden]) ~ :not([hidden]) {
+  border-color: rgba(203, 213, 225, 0.55);
+}
+
+/* --- Hover: backgrounds --- */
+.hover\:bg-slate-800\/40:hover { background-color: rgba(226, 232, 240, 0.52); }
+.hover\:bg-slate-800\/30:hover { background-color: rgba(226, 232, 240, 0.38); }
+.hover\:bg-slate-800\/20:hover { background-color: rgba(226, 232, 240, 0.24); }
+.hover\:bg-cyan-400\/12:hover  { background-color: rgba(8, 145, 178, 0.12); }
+
+/* --- Hover: borders --- */
+.hover\:border-slate-600:hover      { border-color: rgba(148, 163, 184, 0.60); }
+.hover\:border-slate-500:hover      { border-color: rgba(100, 116, 139, 0.55); }
+.hover\:border-slate-700\/80:hover  { border-color: rgba(203, 213, 225, 1); }
+.hover\:border-cyan-400\/20:hover   { border-color: rgba(8, 145, 178, 0.20); }
+.hover\:border-cyan-400\/25:hover   { border-color: rgba(8, 145, 178, 0.25); }
+.hover\:border-cyan-400\/30:hover   { border-color: rgba(8, 145, 178, 0.30); }
+.hover\:border-cyan-400\/40:hover   { border-color: rgba(8, 145, 178, 0.40); }
+
+/* --- Hover: text --- */
+.hover\:text-white:hover        { color: #0f172a; }
+.hover\:text-slate-200:hover    { color: #0f172a; }
+.hover\:text-slate-300:hover    { color: #1e293b; }
+.hover\:text-cyan-300:hover     { color: #0e7490; }
+.hover\:text-cyan-400:hover     { color: #0891b2; }
+/* opacity-suffix hover text handled by color value above */
+.hover\:text-cyan-400\/60:hover { color: rgba(8, 145, 178, 0.70); }
+.hover\:text-cyan-400\/70:hover { color: rgba(8, 145, 178, 0.80); }

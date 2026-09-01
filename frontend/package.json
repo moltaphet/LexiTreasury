@@ -1,0 +1,35 @@
+{
+  "name": "lexitreasury-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "jest --testPathPatterns=tests/unit",
+    "test:integration": "jest --testPathPatterns=tests/integration",
+    "test:all": "jest",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "playwright:install": "playwright install chromium"
+  },
+  "dependencies": {
+    "genlayer-js": "1.1.8",
+    "next": "^16.3.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.20",
+    "jest": "^30.5.0",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3"
+  }
+}
