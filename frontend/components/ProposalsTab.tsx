@@ -95,9 +95,12 @@ function DetailPanel({
     { label: "Requested",       value: `${attoToTokens(proposal.requested_amount)} tokens` },
     { label: "Allocated",       value: proposal.allocated_amount ? `${attoToTokens(proposal.allocated_amount)} tokens` : "--" },
     { label: "Commit Bracket",  value: proposal.commit_bracket || "--" },
+    { label: "Contributors",    value: proposal.contributor_bracket || "--" },
+    { label: "Structural Quality", value: proposal.quality_bracket || "--" },
     { label: "License SPDX",    value: proposal.license_spdx || "--" },
     { label: "OSI Approved",    value: proposal.is_osi_approved || "--" },
-    { label: "Has Audit",       value: proposal.has_audit || "--" },
+    { label: "Audit Verified",  value: proposal.has_audit || "--" },
+    { label: "Attestation UID", value: proposal.audit_uid || "--" },
     { label: "Decision",        value: proposal.evaluation_decision || "--" },
     { label: "Submitted At",    value: proposal.submitted_at || "--" },
   ];

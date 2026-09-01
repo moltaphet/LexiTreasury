@@ -3,21 +3,36 @@
   "chain_id": 61999,
   "rpc_url": "https://studio.genlayer.com/api",
   "deployer": {
-    "name": "lexitreasury_v3_deployer",
-    "address": "0x07fa7df314d0f7e037b72760b416a77a29513988"
+    "name": "lexitreasury_v4_deployer",
+    "address": "0xc479950e82de5920b6650632b148a8ddfa21ebb1"
   },
   "contract": {
     "name": "LexiTreasury",
+    "version": "2.0-hardened",
     "source": "contracts/lexitreasury.py",
-    "address": "0xE091479d636d716b0a3eFcdb6232Dd420d3dFbF9",
-    "deploy_tx": "0xfc999e33c6d0a49a54871c17ac8f965e5517401a1e8db2fb7dcbfe32911f8dc7",
+    "address": "0x141FFe84339FA98E0237076B6f6a3262ce49c109",
+    "deploy_tx": "0x17e176afdbe8a195b5ed1a02bf4ea9246df8cd2b6d91561f58b7fdc947cb89e3",
     "deployed_at": "2026-09-01"
   },
   "constructor_args": {
-    "constitution": "Projects must demonstrate active open-source development. Minimum ACTIVE commit bracket required. An OSI-approved license is mandatory for any funding. Security audits by recognized firms qualify projects for higher-tier allocations. Tier 1 requires MATURE or VETERAN activity plus both an OSI license and a completed audit. Tier 2 requires ACTIVE or better activity plus either an OSI license or an audit. Tier 3 requires MINIMAL or better activity plus any valid license. Projects with zero commits receive no allocation regardless of decision.",
+    "constitution": "Projects must demonstrate active open-source development. Minimum ACTIVE commit bracket required. An OSI-approved license is mandatory for any funding. Structural engineering quality (test suite, CI, build manifest) is required; raw commit volume alone does not qualify. Bot-only or single-author commit histories are disqualified from top-tier funding. Security audits count only when verified via an on-chain attestation from a trusted auditor. Tier 1 requires MATURE or VETERAN activity plus an OSI license, an on-chain-verified audit, standard-or-better structural quality, and a genuine multi-contributor base. Tier 2 requires ACTIVE or better activity plus either an OSI license or a verified audit. Tier 3 requires MINIMAL or better activity plus valid structural quality. Projects with zero commits receive no allocation regardless of decision.",
     "tier_cap_1": "10000000000000000000000",
     "tier_cap_2": "5000000000000000000000",
     "tier_cap_3": "1000000000000000000000"
+  },
+  "security_hardening": {
+    "prompt_injection_defense": true,
+    "data_isolation": true,
+    "anti_gaming_quality_bracket": true,
+    "anti_gaming_contributor_bracket": true,
+    "onchain_audit_attestation": true,
+    "fail_closed_consensus": true
+  },
+  "tests": {
+    "total": 134,
+    "core": 114,
+    "adversarial": 20,
+    "all_passing": true
   },
   "consensus": {
     "validators_agreed": 5,

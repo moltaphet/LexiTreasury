@@ -3,7 +3,7 @@ import type { Address } from "genlayer-js/types";
 
 const CONTRACT_ADDRESS =
   (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as Address) ??
-  "0xE091479d636d716b0a3eFcdb6232Dd420d3dFbF9";
+  "0x141FFe84339FA98E0237076B6f6a3262ce49c109";
 
 export interface Proposal {
   proposal_id: string;
@@ -14,12 +14,25 @@ export interface Proposal {
   tier: string;
   allocated_amount: string;
   commit_bracket: string;
+  contributor_bracket: string;
+  quality_bracket: string;
   license_spdx: string;
   is_osi_approved: string;
   has_audit: string;
+  audit_uid: string;
   evaluation_decision: string;
   evaluation_reasoning: string;
   submitted_at: string;
+}
+
+export interface AuditAttestation {
+  attestation_uid: string;
+  owner: string;
+  repo: string;
+  auditor_id: string;
+  report_hash: string;
+  status: string;
+  recorded_at: string;
 }
 
 export interface TierCaps {
@@ -60,6 +73,28 @@ export async function fetchAllProposals(): Promise<Proposal[]> {
     args: [],
   });
   return (result as unknown as Proposal[]) ?? [];
+}
+
+export async function fetchTrustedAuditors(): Promise<string[]> {
+  const client = readClient();
+  const result = await client.readContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "get_trusted_auditors",
+    args: [],
+  });
+  return (result as unknown as string[]) ?? [];
+}
+
+export async function fetchAuditAttestation(
+  attestationUid: string
+): Promise<AuditAttestation> {
+  const client = readClient();
+  const result = await client.readContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "get_audit_attestation",
+    args: [attestationUid],
+  });
+  return result as unknown as AuditAttestation;
 }
 
 // account is a plain address string (not an Account object) so genlayer-js

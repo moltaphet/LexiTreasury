@@ -10,7 +10,7 @@ const EXPLORER_URL =
   process.env.NEXT_PUBLIC_EXPLORER_URL ?? "https://studio.genlayer.com";
 const CONTRACT_ADDRESS =
   process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ??
-  "0x5f3b98c0315C2b9F2aE71d4d3feA6856248A63B4";
+  "0x141FFe84339FA98E0237076B6f6a3262ce49c109";
 
 const SHORT_ADDR = `${CONTRACT_ADDRESS.slice(0, 8)}...${CONTRACT_ADDRESS.slice(-6)}`;
 
@@ -238,7 +238,7 @@ export default function Header() {
             </span>
           </div>
 
-          {/* Wallet Connect Button — hidden during the localStorage hydration frame
+          {/* Wallet Connect Button -- hidden during the localStorage hydration frame
               to prevent a flash from "Connect Wallet" -> connected address */}
           <div
             className="relative transition-opacity duration-150"

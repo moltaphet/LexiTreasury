@@ -291,7 +291,9 @@ export default function ConstitutionTab() {
             requirements={[
               "MATURE or VETERAN commits",
               "OSI-approved license",
-              "Completed security audit",
+              "On-chain verified audit",
+              "STANDARD+ structural quality",
+              "Real multi-contributor team",
             ]}
             accent={{
               border: "border-cyan-400/20",
@@ -307,7 +309,7 @@ export default function ConstitutionTab() {
             description="Mid-range allocation. Active projects meeting core standards."
             requirements={[
               "ACTIVE or better commits",
-              "OSI license OR security audit",
+              "OSI license OR verified audit",
             ]}
             accent={{
               border: "border-violet-400/20",
@@ -323,7 +325,7 @@ export default function ConstitutionTab() {
             description="Entry allocation. Any licensed project with minimal activity."
             requirements={[
               "MINIMAL or better commits",
-              "Any valid license",
+              "BASIC+ structural quality",
             ]}
             accent={{
               border: "border-slate-600/40",

@@ -13,7 +13,7 @@ import Footer from "@/components/Footer";
 
 const CONTRACT_ADDRESS =
   process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ??
-  "0x5f3b98c0315C2b9F2aE71d4d3feA6856248A63B4";
+  "0x141FFe84339FA98E0237076B6f6a3262ce49c109";
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabId>("constitution");
@@ -67,7 +67,7 @@ export default function Home() {
             </h2>
             <p className="text-slate-400 text-sm leading-relaxed">
               LexiTreasury evaluates GitHub repositories against a natural-language
-              DAO constitution — live on GenLayer. Each proposal triggers a
+              DAO constitution -- live on GenLayer. Each proposal triggers a
               non-deterministic AI consensus across 5 validators before any
               funding decision is made.
             </p>

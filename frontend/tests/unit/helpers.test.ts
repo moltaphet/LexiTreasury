@@ -45,10 +45,10 @@ describe("attoToTokens", () => {
 // shortenAddress
 // ---------------------------------------------------------------------------
 describe("shortenAddress", () => {
-  const FULL = "0x5f3b98c0315C2b9F2aE71d4d3feA6856248A63B4";
+  const FULL = "0x141FFe84339FA98E0237076B6f6a3262ce49c109";
 
   test("returns 'start...end' for a standard 42-char address", () => {
-    expect(shortenAddress(FULL)).toBe("0x5f3b...63B4");
+    expect(shortenAddress(FULL)).toBe("0x141F...c109");
   });
 
   test("returns the original string for addresses shorter than 10 chars", () => {
@@ -61,8 +61,8 @@ describe("shortenAddress", () => {
 
   test("preserves case in both segments", () => {
     const result = shortenAddress(FULL);
-    expect(result.startsWith("0x5f3b")).toBe(true);
-    expect(result.endsWith("63B4")).toBe(true);
+    expect(result.startsWith("0x141F")).toBe(true);
+    expect(result.endsWith("c109")).toBe(true);
   });
 });
 

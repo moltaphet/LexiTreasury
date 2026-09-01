@@ -14,7 +14,7 @@ const FAQS: { q: string; a: React.ReactNode; tag: string }[] = [
         LexiTreasury is an autonomous treasury smart contract deployed on GenLayer. It
         evaluates GitHub-based funding proposals against a natural-language DAO constitution
         through AI consensus across 5 validator nodes. No human committee, no multisig
-        quorum — the contract and its constitution are the sole decision-making authority.
+        quorum -- the contract and its constitution are the sole decision-making authority.
       </p>
     ),
   },
@@ -24,7 +24,7 @@ const FAQS: { q: string; a: React.ReactNode; tag: string }[] = [
     a: (
       <p>
         GenLayer is a blockchain whose virtual machine (GenVM) can execute non-deterministic
-        code — including LLM prompts and live HTTP calls — inside a smart contract, with
+        code -- including LLM prompts and live HTTP calls -- inside a smart contract, with
         validators reaching consensus on the outcome. This is what makes LexiTreasury
         possible: the contract fetches live GitHub data and asks an LLM a question, all
         on-chain, without trusting any oracle or off-chain relay.
@@ -43,18 +43,18 @@ const FAQS: { q: string; a: React.ReactNode; tag: string }[] = [
         </p>
         <ol className="list-decimal list-inside space-y-1 text-slate-400 pl-1">
           <li>
-            <span className="text-slate-300">GitHub repository URL</span> — must start
+            <span className="text-slate-300">GitHub repository URL</span> -- must start
             with{" "}
             <span className="font-mono text-[11px] bg-slate-800 px-1.5 py-0.5 rounded">
               https://github.com/
             </span>
           </li>
           <li>
-            <span className="text-slate-300">Requested token amount</span> — capped by
+            <span className="text-slate-300">Requested token amount</span> -- capped by
             the tier your project qualifies for (max 10,000 for Tier 1)
           </li>
           <li>
-            <span className="text-slate-300">Private key</span> — a StudioNet account key
+            <span className="text-slate-300">Private key</span> -- a StudioNet account key
             used client-side to sign the transaction; never stored
           </li>
         </ol>
@@ -111,16 +111,17 @@ const FAQS: { q: string; a: React.ReactNode; tag: string }[] = [
         <p>
           Tier assignment is computed by a pure deterministic Python function{" "}
           <span className="font-mono text-[11px] bg-slate-800 px-1.5 py-0.5 rounded text-indigo-300">
-            _compute_tier(bracket, is_osi, has_audit)
+            _compute_tier(bracket, is_osi, has_audit, quality, contributors)
           </span>{" "}
-          — no LLM is involved. This guarantees all 5 validators agree on the same
-          tier regardless of network state.
+          -- no LLM is involved. This guarantees all 5 validators agree on the same
+          tier regardless of network state. Anti-gaming gates fail-closed on zero
+          commits, bot-only histories, or repositories with no structural quality.
         </p>
         <div className="space-y-1.5 mt-1">
           {[
-            { tier: "TIER_1", cap: "10,000 tokens", rule: "MATURE or VETERAN + OSI license + security audit", color: "text-cyan-400" },
-            { tier: "TIER_2", cap:  "5,000 tokens", rule: "ACTIVE or better + OSI license OR audit",          color: "text-violet-400" },
-            { tier: "TIER_3", cap:  "1,000 tokens", rule: "MINIMAL or better + any valid license",            color: "text-slate-400" },
+            { tier: "TIER_1", cap: "10,000 tokens", rule: "MATURE/VETERAN + OSI + on-chain audit + STANDARD+ quality + real team", color: "text-cyan-400" },
+            { tier: "TIER_2", cap:  "5,000 tokens", rule: "MATURE/VETERAN + OSI OR verified audit; or ACTIVE + OSI",              color: "text-violet-400" },
+            { tier: "TIER_3", cap:  "1,000 tokens", rule: "MINIMAL or better + at least BASIC structural quality",                color: "text-slate-400" },
           ].map(({ tier, cap, rule, color }) => (
             <div key={tier} className="glass-inset rounded-lg px-3 py-2.5 flex items-start gap-3">
               <span className={`text-[11px] font-mono font-bold w-14 shrink-0 ${color}`}>{tier}</span>
@@ -132,8 +133,9 @@ const FAQS: { q: string; a: React.ReactNode; tag: string }[] = [
           ))}
         </div>
         <p className="text-xs text-slate-500">
-          If the LLM returns REJECTED the tier is discarded. A NONE commit bracket
-          always results in no allocation regardless of the LLM outcome.
+          If the LLM returns REJECTED the tier is discarded. A NONE commit bracket,
+          a bot-only contributor profile, or zero structural quality always results
+          in no allocation regardless of the LLM outcome (fail-closed).
         </p>
       </div>
     ),
@@ -219,7 +221,7 @@ const FAQS: { q: string; a: React.ReactNode; tag: string }[] = [
         <span className="font-mono text-[11px] bg-slate-800 px-1.5 py-0.5 rounded text-emerald-300">
           allocated_amount
         </span>{" "}
-        set to the minimum of the requested amount and the tier cap — all written
+        set to the minimum of the requested amount and the tier cap -- all written
         on-chain during the consensus transaction. A subsequent call to{" "}
         <span className="font-mono text-[11px] bg-slate-800 px-1.5 py-0.5 rounded text-cyan-300">
           fund_proposal(proposal_id)
@@ -234,7 +236,7 @@ const FAQS: { q: string; a: React.ReactNode; tag: string }[] = [
     q: "Is the private key I enter in the form safe?",
     a: (
       <p>
-        The private key is used client-side only — inside the browser — by the
+        The private key is used client-side only -- inside the browser -- by the
         genlayer-js SDK to sign the transaction before it is broadcast to the
         StudioNet RPC endpoint. It is never sent to any server, never stored in
         localStorage or cookies, and cleared from React state after a successful
