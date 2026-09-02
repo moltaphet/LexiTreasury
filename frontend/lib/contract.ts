@@ -3,16 +3,19 @@ import type { Address } from "genlayer-js/types";
 
 const CONTRACT_ADDRESS =
   (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as Address) ??
-  "0x141FFe84339FA98E0237076B6f6a3262ce49c109";
+  "0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf";
 
 export interface Proposal {
   proposal_id: string;
   github_url: string;
   applicant: string;
+  recipient: string;
   requested_amount: string;
   status: "PENDING" | "APPROVED" | "REJECTED" | "FUNDED";
   tier: string;
   allocated_amount: string;
+  maintainer_verified: string;
+  maintainer_login: string;
   commit_bracket: string;
   contributor_bracket: string;
   quality_bracket: string;
@@ -75,6 +78,36 @@ export async function fetchAllProposals(): Promise<Proposal[]> {
   return (result as unknown as Proposal[]) ?? [];
 }
 
+export async function fetchTreasuryBalance(): Promise<string> {
+  const client = readClient();
+  const result = await client.readContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "get_treasury_balance",
+    args: [],
+  });
+  return String(result ?? "0");
+}
+
+export async function fetchTotalEscrowed(): Promise<string> {
+  const client = readClient();
+  const result = await client.readContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "get_total_escrowed",
+    args: [],
+  });
+  return String(result ?? "0");
+}
+
+export async function fetchClaimable(address: string): Promise<string> {
+  const client = readClient();
+  const result = await client.readContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "get_claimable",
+    args: [address],
+  });
+  return String(result ?? "0");
+}
+
 export async function fetchTrustedAuditors(): Promise<string[]> {
   const client = readClient();
   const result = await client.readContract({
@@ -113,6 +146,61 @@ export async function submitProposal(
     address: CONTRACT_ADDRESS,
     functionName: "submit_proposal",
     args: [githubUrl, amountAtto],
+    value: BigInt(0),
+  });
+  return txHash as `0x${string}`;
+}
+
+function writeClient(address: string) {
+  if (typeof window === "undefined" || !window.ethereum) {
+    throw new Error("No wallet provider detected. Please install MetaMask.");
+  }
+  return createClient({ chain: chains.studionet, account: address as Address });
+}
+
+// deposit() is payable and owner-only: the treasury reserve is credited with the
+// native value attached to the call, so `amountTokens` is sent as msg.value.
+export async function depositToTreasury(
+  amountTokens: number,
+  address: string
+): Promise<`0x${string}`> {
+  const client = writeClient(address);
+  const amountAtto = BigInt(Math.round(amountTokens)) * BigInt(10 ** 18);
+  if (amountAtto <= BigInt(0)) {
+    throw new Error("Deposit amount must be positive.");
+  }
+  const txHash = await client.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "deposit",
+    args: [],
+    value: amountAtto,
+  });
+  return txHash as `0x${string}`;
+}
+
+// execute_proposal releases an APPROVED allocation from the reserve into the
+// verified recipient's claimable escrow. Callable by the owner or the recipient.
+export async function executeProposal(
+  proposalId: string,
+  address: string
+): Promise<`0x${string}`> {
+  const client = writeClient(address);
+  const txHash = await client.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "execute_proposal",
+    args: [proposalId],
+    value: BigInt(0),
+  });
+  return txHash as `0x${string}`;
+}
+
+// withdraw pays the caller's entire claimable escrow balance out of the contract.
+export async function withdrawFunds(address: string): Promise<`0x${string}`> {
+  const client = writeClient(address);
+  const txHash = await client.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "withdraw",
+    args: [],
     value: BigInt(0),
   });
   return txHash as `0x${string}`;

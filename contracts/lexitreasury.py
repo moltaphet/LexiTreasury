@@ -104,6 +104,13 @@ _CI_DIR_NAMES: frozenset = frozenset({".github", ".circleci"})
 # malicious applicant cannot redirect verification to an attacker-controlled file.
 _ATTESTATION_PATH: str = ".well-known/genlayer-audit.json"
 
+# Maintainer manifest is fetched from a fixed, well-known repository path. Only a
+# principal with write access to the repository can publish or change it, so the
+# payout address it declares is authorised by the repository owner/maintainer. The
+# declared owner is cross-checked against the owner login the GitHub API reports for
+# the repository, binding the payout to the real repository owner from the evidence.
+_MAINTAINER_PATH: str = ".well-known/genlayer-treasury.json"
+
 # ---------------------------------------------------------------------------
 # Prompt-injection defense
 # ---------------------------------------------------------------------------
@@ -165,6 +172,20 @@ def _sanitize_hex64(value) -> str:
     return ""
 
 
+def _normalize_address(value) -> str:
+    """Return a canonical lowercase '0x' + 40-hex address, or '' if not a valid address.
+
+    Used to compare on-chain payout recipients against repository-declared payout
+    addresses without depending on checksum casing.
+    """
+    text = str(value).strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if len(text) == 40 and all(c in "0123456789abcdef" for c in text):
+        return "0x" + text
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Storage dataclasses
 # ---------------------------------------------------------------------------
@@ -176,10 +197,13 @@ class Proposal:
     proposal_id:          str
     github_url:           str
     applicant:            str    # Address serialised as hex string
+    recipient:            str    # Payout target address (defaults to the applicant)
     requested_amount:     u256   # In attos
     status:               str    # STATUS_* constant
     tier:                 str    # TIER_1 / TIER_2 / TIER_3 / ""
     allocated_amount:     u256   # Effective funding cap applied at evaluation time
+    maintainer_verified:  str    # "true" / "false" - recipient bound to repo owner
+    maintainer_login:     str    # Verified GitHub owner login, "" if unverified
     commit_bracket:       str    # BRACKET_* constant (set after evaluation)
     contributor_bracket:  str    # CONTRIB_* constant (set after evaluation)
     quality_bracket:      str    # QUALITY_* constant (set after evaluation)
@@ -489,7 +513,72 @@ def _verify_audit_onchain(claim: dict, owner: str, repo: str,
     return True
 
 
-def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: dict) -> dict:
+def _fetch_maintainer_claim(owner: str, repo: str) -> dict:
+    """Fetch the repository's well-known treasury manifest declaring the payout address.
+
+    The manifest lives at a fixed well-known path that only a principal with write
+    access to the repository can control. It must declare the repository owner login
+    it is published under and the on-chain payout address authorised to receive funds.
+
+    This function performs NO trust decision - it only produces a claim. The binding to
+    the real repository owner and the proposal recipient is done deterministically
+    afterwards in _verify_maintainer.
+
+    Fail-closed: any absence, parse error, or malformed field yields an empty claim.
+    """
+    empty = {"declared_owner": "", "payout_address": ""}
+
+    manifest_url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{_MAINTAINER_PATH}"
+    resp = gl.nondet.web.get(manifest_url, headers=_RAW_HEADERS)
+    if resp.status != 200:
+        return empty
+
+    try:
+        manifest = json.loads(resp.body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return empty
+    if not isinstance(manifest, dict):
+        return empty
+
+    declared_owner = _sanitize_token(manifest.get("owner", "")).lower()
+    payout_address = _normalize_address(manifest.get("payout_address", ""))
+    return {"declared_owner": declared_owner, "payout_address": payout_address}
+
+
+def _verify_maintainer(claim: dict, url_owner: str, api_owner_login: str,
+                       recipient_address: str) -> bool:
+    """Deterministically decide whether the payout recipient is the repository owner.
+
+    All inputs are derived from the GitHub evidence payload (the repo API owner login
+    and the repo-controlled manifest) plus the proposal's on-chain recipient. The check
+    passes only when every binding holds:
+
+      - the manifest declares a payout address (fail-closed if absent),
+      - the owner login reported by the GitHub API matches the owner in the submitted
+        URL (the evidence describes the repository that was actually applied for),
+      - the manifest is published under that same owner login (proving it lives in the
+        owner's repository, not an attacker-controlled fork/name), and
+      - the declared payout address equals the proposal's on-chain recipient.
+
+    Pure and reproducible on every validator.
+    """
+    payout = claim.get("payout_address", "")
+    if not payout:
+        return False
+
+    api_login = str(api_owner_login).strip().lower()
+    if not api_login:
+        return False
+    if str(url_owner).strip().lower() != api_login:
+        return False
+    if claim.get("declared_owner", "") != api_login:
+        return False
+
+    return payout == _normalize_address(recipient_address)
+
+
+def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: dict,
+                        recipient_address: str) -> dict:
     """Fetch and normalise GitHub repository metrics. Must run inside a nondet context.
 
     Produces only invariant, discrete signals plus the deterministically verified audit
@@ -517,6 +606,11 @@ def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: d
     if not isinstance(repo_data, dict):
         raise gl.vm.UserError(f"{_ERR_TRANSIENT} Unexpected response shape from GitHub")
 
+    # Extract the repository owner login from the evidence payload. This is the real
+    # repository owner GitHub reports, used to bind the payout recipient.
+    owner_block = repo_data.get("owner") if isinstance(repo_data.get("owner"), dict) else {}
+    owner_login: str = str(owner_block.get("login") or "").strip()
+
     # Extract stable license field
     license_block = repo_data.get("license") or {}
     raw_spdx: str = str(license_block.get("spdx_id") or "").strip()
@@ -537,9 +631,17 @@ def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: d
     claim = _fetch_audit_claim(owner, repo)
     has_audit: bool = _verify_audit_onchain(claim, owner, repo, trusted_auditors, attestations)
 
+    # Maintainer binding: fetch the repo-controlled payout manifest and verify the
+    # proposal recipient is the repository owner authorised to receive funds.
+    maintainer_claim = _fetch_maintainer_claim(owner, repo)
+    maintainer_verified: bool = _verify_maintainer(
+        maintainer_claim, owner, owner_login, recipient_address
+    )
+
     return {
         "owner":               owner,
         "repo":                repo,
+        "owner_login":         owner_login,
         "license_spdx":        license_spdx,
         "is_osi_approved":     is_osi_approved,
         "commit_bracket":      commit_signals["commit_bracket"],
@@ -547,6 +649,8 @@ def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: d
         "quality_bracket":     quality_bracket,
         "has_audit":           has_audit,
         "audit_uid":           claim["audit_uid"] if has_audit else "",
+        "maintainer_verified": maintainer_verified,
+        "maintainer_login":    owner_login if maintainer_verified else "",
     }
 
 
@@ -725,13 +829,19 @@ class LexiTreasury(gl.Contract):
     # ---- Storage fields - class-level type annotations only ----
     owner:             Address
     constitution:      str
-    treasury_balance:  u256       # Gross treasury balance in attos
+    treasury_balance:  u256       # Unallocated treasury reserve in attos
+    total_escrowed:    u256       # Sum of all claimable balances not yet withdrawn
     proposals:         TreeMap[str, Proposal]
     proposal_ids:      DynArray[str]
     proposal_count:    u256
     tier_cap_1:        u256       # Maximum allocation for TIER_1 proposals, in attos
     tier_cap_2:        u256
     tier_cap_3:        u256
+
+    # Claimable escrow: address hex -> amount in attos released by execute_proposal
+    # and withdrawable by the recipient. Kept separate from treasury_balance so the
+    # contract's holdings are always treasury_balance (unallocated) + total_escrowed.
+    claimable:         TreeMap[str, u256]
 
     # Audit attestation registry
     trusted_auditors:  TreeMap[str, str]              # auditor_id -> AUDITOR_ACTIVE/REVOKED
@@ -763,6 +873,7 @@ class LexiTreasury(gl.Contract):
         self.owner             = gl.message.sender_address
         self.constitution      = constitution.strip()
         self.treasury_balance  = u256(0)
+        self.total_escrowed    = u256(0)
         self.proposal_count    = u256(0)
         self.tier_cap_1        = u256(tier_cap_1)
         self.tier_cap_2        = u256(tier_cap_2)
@@ -779,6 +890,19 @@ class LexiTreasury(gl.Contract):
     @gl.public.view
     def get_treasury_balance(self) -> int:
         return int(self.treasury_balance)
+
+    @gl.public.view
+    def get_total_escrowed(self) -> int:
+        """Total attos released into claimable escrow and not yet withdrawn."""
+        return int(self.total_escrowed)
+
+    @gl.public.view
+    def get_claimable(self, address: str) -> int:
+        """Return the withdrawable escrow balance (in attos) for an address."""
+        key = _normalize_address(address)
+        if not key:
+            return 0
+        return int(self.claimable.get(key, u256(0)))
 
     @gl.public.view
     def get_proposal_count(self) -> int:
@@ -801,10 +925,13 @@ class LexiTreasury(gl.Contract):
             "proposal_id":          p.proposal_id,
             "github_url":           p.github_url,
             "applicant":            p.applicant,
+            "recipient":            p.recipient,
             "requested_amount":     int(p.requested_amount),
             "status":               p.status,
             "tier":                 p.tier,
             "allocated_amount":     int(p.allocated_amount),
+            "maintainer_verified":  p.maintainer_verified,
+            "maintainer_login":     p.maintainer_login,
             "commit_bracket":       p.commit_bracket,
             "contributor_bracket":  p.contributor_bracket,
             "quality_bracket":      p.quality_bracket,
@@ -867,11 +994,17 @@ class LexiTreasury(gl.Contract):
     # Deterministic write methods
     # ---------------------------------------------------------------
 
-    @gl.public.write
-    def deposit(self, amount: int) -> None:
-        """Add funds to the treasury reserve. Owner-only."""
+    @gl.public.write.payable
+    def deposit(self) -> None:
+        """Fund the treasury reserve with attached native value. Owner-only.
+
+        The credited amount is the native value transferred with the call
+        (gl.message.value), so the on-chain treasury balance is backed by real
+        native tokens held by the contract rather than a bookkeeping-only integer.
+        """
         if gl.message.sender_address != self.owner:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Only the owner can deposit funds")
+        amount: int = int(gl.message.value)
         if amount <= 0:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Deposit amount must be positive")
         self.treasury_balance = self.treasury_balance + u256(amount)
@@ -894,14 +1027,18 @@ class LexiTreasury(gl.Contract):
         next_idx: int  = int(self.proposal_count) + 1
         proposal_id    = f"prop_{next_idx}"
 
+        applicant_addr: str = str(gl.message.sender_address)
         self.proposals[proposal_id] = Proposal(
             proposal_id          = proposal_id,
             github_url           = github_url.strip(),
-            applicant            = str(gl.message.sender_address),
+            applicant            = applicant_addr,
+            recipient            = applicant_addr,
             requested_amount     = u256(requested_amount),
             status               = STATUS_PENDING,
             tier                 = "",
             allocated_amount     = u256(0),
+            maintainer_verified  = "false",
+            maintainer_login     = "",
             commit_bracket       = "",
             contributor_bracket  = "",
             quality_bracket      = "",
@@ -919,19 +1056,51 @@ class LexiTreasury(gl.Contract):
         return proposal_id
 
     @gl.public.write
-    def fund_proposal(self, proposal_id: str) -> None:
-        """Transfer the allocated amount from the treasury to FUNDED state. Owner-only."""
-        if gl.message.sender_address != self.owner:
-            raise gl.vm.UserError(f"{_ERR_EXPECTED} Only the owner can fund proposals")
+    def execute_proposal(self, proposal_id: str) -> int:
+        """Release an approved proposal's allocation into the recipient's claimable escrow.
+
+        This is the settlement bridge: once a proposal is APPROVED by consensus its
+        funds are moved out of the unallocated treasury reserve and into a per-recipient
+        claimable balance, and the proposal is marked FUNDED. Nothing stays pending after
+        approval - approval directly enables execution here.
+
+        Callable by the treasury owner or by the verified recipient (either party can
+        settle an already-approved decision; the destination is fixed by consensus).
+
+        Guards (all fail-closed, strict integer atto-math):
+          - proposal must be APPROVED,
+          - the recipient must be bound to the repository owner (maintainer_verified),
+          - allocation must be non-zero,
+          - the unallocated treasury reserve must cover the allocation.
+
+        Returns the amount released into escrow, in attos.
+        """
         if proposal_id not in self.proposals:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Unknown proposal: {proposal_id!r}")
 
         proposal = self.proposals[proposal_id]
 
+        recipient_key: str = _normalize_address(proposal.recipient)
+        is_owner: bool = gl.message.sender_address == self.owner
+        is_recipient: bool = _normalize_address(str(gl.message.sender_address)) == recipient_key
+        if not (is_owner or is_recipient):
+            raise gl.vm.UserError(
+                f"{_ERR_EXPECTED} Only the owner or the recipient can execute proposals"
+            )
+
         if proposal.status != STATUS_APPROVED:
             raise gl.vm.UserError(
                 f"{_ERR_EXPECTED} Proposal {proposal_id!r} has status "
                 f"{proposal.status!r}, expected APPROVED"
+            )
+        if proposal.maintainer_verified != "true":
+            raise gl.vm.UserError(
+                f"{_ERR_EXPECTED} Proposal {proposal_id!r} recipient is not a "
+                f"verified repository maintainer"
+            )
+        if not recipient_key:
+            raise gl.vm.UserError(
+                f"{_ERR_EXPECTED} Proposal {proposal_id!r} has an invalid recipient"
             )
         if proposal.allocated_amount == u256(0):
             raise gl.vm.UserError(
@@ -944,9 +1113,37 @@ class LexiTreasury(gl.Contract):
                 f"required={int(proposal.allocated_amount)}"
             )
 
-        self.treasury_balance = self.treasury_balance - proposal.allocated_amount
+        amount: u256 = proposal.allocated_amount
+        self.treasury_balance = self.treasury_balance - amount
+        self.claimable[recipient_key] = self.claimable.get(recipient_key, u256(0)) + amount
+        self.total_escrowed = self.total_escrowed + amount
+
         proposal.status = STATUS_FUNDED
         self.proposals[proposal_id] = proposal
+        return int(amount)
+
+    @gl.public.write
+    def withdraw(self) -> int:
+        """Withdraw the caller's entire claimable escrow balance as a native transfer.
+
+        Settles an executed proposal end-to-end: the caller's claimable balance is
+        zeroed (checks-effects-interactions ordering guards against re-entrancy) and the
+        corresponding native value is transferred out of the contract to the caller.
+
+        Returns the amount withdrawn, in attos.
+        """
+        caller_key: str = _normalize_address(str(gl.message.sender_address))
+        amount: u256 = self.claimable.get(caller_key, u256(0)) if caller_key else u256(0)
+        if amount == u256(0):
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} No claimable balance to withdraw")
+
+        # Effects first: zero the balance and reduce the escrow total before the transfer.
+        self.claimable[caller_key] = u256(0)
+        self.total_escrowed = self.total_escrowed - amount
+
+        # Interaction: move real native value from the contract to the recipient.
+        gl.get_contract_at(gl.message.sender_address).emit_transfer(value=amount)
+        return int(amount)
 
     @gl.public.write
     def update_constitution(self, new_constitution: str) -> None:
@@ -1095,6 +1292,7 @@ class LexiTreasury(gl.Contract):
         # Snapshot all storage reads before entering the nondet context.
         constitution: str  = self.constitution
         github_url: str    = proposal.github_url
+        recipient: str     = proposal.recipient
         requested: u256    = proposal.requested_amount
         cap_1: u256        = self.tier_cap_1
         cap_2: u256        = self.tier_cap_2
@@ -1119,7 +1317,9 @@ class LexiTreasury(gl.Contract):
                 }
 
         def leader_fn() -> dict:
-            metrics = _fetch_repo_metrics(github_url, trusted_snapshot, attest_snapshot)
+            metrics = _fetch_repo_metrics(
+                github_url, trusted_snapshot, attest_snapshot, recipient
+            )
             decision, reasoning = _run_llm_evaluation(
                 constitution, metrics["owner"], metrics["repo"], metrics
             )
@@ -1147,6 +1347,8 @@ class LexiTreasury(gl.Contract):
                 "is_osi_approved":     "true" if metrics["is_osi_approved"] else "false",
                 "has_audit":           "true" if metrics["has_audit"] else "false",
                 "audit_uid":           metrics["audit_uid"],
+                "maintainer_verified": "true" if metrics["maintainer_verified"] else "false",
+                "maintainer_login":    metrics["maintainer_login"],
             }
 
         def validator_fn(leaders_res: gl.vm.Result) -> bool:
@@ -1170,10 +1372,13 @@ class LexiTreasury(gl.Contract):
                 and ldr["quality_bracket"]     == val["quality_bracket"]
                 and ldr["is_osi_approved"]     == val["is_osi_approved"]
                 and ldr["has_audit"]           == val["has_audit"]
+                and ldr["maintainer_verified"] == val["maintainer_verified"]
             )
-            # ldr["reasoning"], ldr["license_spdx"] and ldr["audit_uid"] are excluded:
-            # reasoning varies naturally; license_spdx is informational (consensus is on the
-            # derived boolean is_osi_approved); audit_uid is fully determined by has_audit.
+            # ldr["reasoning"], ldr["license_spdx"], ldr["audit_uid"] and
+            # ldr["maintainer_login"] are excluded: reasoning varies naturally;
+            # license_spdx is informational (consensus is on the derived boolean
+            # is_osi_approved); audit_uid is fully determined by has_audit; and
+            # maintainer_login is fully determined by maintainer_verified.
 
         result: dict = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
@@ -1185,6 +1390,8 @@ class LexiTreasury(gl.Contract):
         proposal.is_osi_approved      = result["is_osi_approved"]
         proposal.has_audit            = result["has_audit"]
         proposal.audit_uid            = result["audit_uid"]
+        proposal.maintainer_verified  = result["maintainer_verified"]
+        proposal.maintainer_login     = result["maintainer_login"]
         proposal.evaluation_decision  = result["decision"]
         proposal.evaluation_reasoning = result["reasoning"]
         proposal.tier                 = result["tier"]

@@ -67,8 +67,12 @@ DEFAULT_AUTHORS = ("alice", "bob", "carol", "dave")
 # Mock helpers
 # ---------------------------------------------------------------------------
 
-def _repo_body(spdx="MIT", topics=None):
-    return json.dumps({"license": {"spdx_id": spdx}, "topics": topics or []})
+def _repo_body(spdx="MIT", topics=None, owner=OWNER):
+    return json.dumps({
+        "license": {"spdx_id": spdx},
+        "topics": topics or [],
+        "owner": {"login": owner},
+    })
 
 
 def _commits_body(n, authors=DEFAULT_AUTHORS, bots=False):
@@ -94,8 +98,28 @@ def _commits_body(n, authors=DEFAULT_AUTHORS, bots=False):
 def mock_repo(vm, spdx="MIT", topics=None, status=200, owner=OWNER, repo=REPO):
     vm.mock_web(
         rf".*api\.github\.com/repos/{owner}/{repo}$",
-        {"status": status, "body": _repo_body(spdx, topics)},
+        {"status": status, "body": _repo_body(spdx, topics, owner)},
     )
+
+
+def mock_maintainer_manifest(vm, present=False, payout_address=None, declared_owner=OWNER,
+                             manifest_status=200, manifest_body=None, owner=OWNER, repo=REPO):
+    """Mock the well-known treasury manifest that binds a payout address to the repo owner.
+
+    present=False registers a 404 (repo publishes no maintainer manifest) so that
+    maintainer_verified stays false. present=True publishes a manifest declaring the
+    repo owner login and the authorised on-chain payout address.
+    """
+    url = rf".*raw\.githubusercontent\.com/{owner}/{repo}/HEAD/\.well-known/genlayer-treasury\.json"
+    if not present:
+        vm.mock_web(url, {"status": 404, "body": "not found"})
+        return
+    if manifest_body is None:
+        manifest_body = json.dumps({
+            "owner": declared_owner,
+            "payout_address": str(payout_address),
+        })
+    vm.mock_web(url, {"status": manifest_status, "body": manifest_body})
 
 
 def mock_commits(vm, count=50, veteran=False, page1_status=200,
@@ -166,6 +190,9 @@ def setup_evaluate_mocks(
     audit_manifest_status=None,
     audit_report_status=200,
     audit_manifest_body=None,
+    maintainer_present=False,
+    maintainer_payout=None,
+    maintainer_declared_owner=OWNER,
     decision="APPROVED",
     reasoning="Satisfies all constitutional requirements",
 ):
@@ -178,6 +205,10 @@ def setup_evaluate_mocks(
         report_path=audit_report_path, report_text=audit_report_text,
         manifest_status=audit_manifest_status, report_status=audit_report_status,
         manifest_body=audit_manifest_body,
+    )
+    mock_maintainer_manifest(
+        vm, present=maintainer_present, payout_address=maintainer_payout,
+        declared_owner=maintainer_declared_owner,
     )
     mock_llm(vm, decision=decision, reasoning=reasoning)
 
@@ -202,6 +233,16 @@ def submit_and_evaluate(vm, treasury, applicant, request=1_000 * ATTO, **mock_kw
     treasury.evaluate_proposal(pid)
     vm.clear_mocks()
     return pid
+
+
+def fund_treasury(vm, treasury, owner, amount):
+    """Owner deposits `amount` attos of native value into the treasury reserve."""
+    prev_sender, prev_value = vm.sender, vm.value
+    vm.sender = owner
+    vm.value = amount
+    treasury.deposit()
+    vm.value = prev_value
+    vm.sender = prev_sender
 
 
 # ---------------------------------------------------------------------------
@@ -280,29 +321,32 @@ class TestConstructor:
 class TestDeposit:
     def test_owner_deposit_increases_balance(self, direct_vm, treasury, direct_owner):
         direct_vm.sender = direct_owner
-        treasury.deposit(500 * ATTO)
+        direct_vm.value = 500 * ATTO
+        treasury.deposit()
+        direct_vm.value = 0
         assert treasury.get_treasury_balance() == 500 * ATTO
 
     def test_cumulative_deposits(self, direct_vm, treasury, direct_owner):
         direct_vm.sender = direct_owner
-        treasury.deposit(100 * ATTO)
-        treasury.deposit(200 * ATTO)
+        direct_vm.value = 100 * ATTO
+        treasury.deposit()
+        direct_vm.value = 200 * ATTO
+        treasury.deposit()
+        direct_vm.value = 0
         assert treasury.get_treasury_balance() == 300 * ATTO
 
     def test_non_owner_deposit_reverts(self, direct_vm, treasury, direct_alice):
         direct_vm.sender = direct_alice
+        direct_vm.value = 100 * ATTO
         with direct_vm.expect_revert("Only the owner can deposit funds"):
-            treasury.deposit(100 * ATTO)
+            treasury.deposit()
+        direct_vm.value = 0
 
-    def test_zero_deposit_reverts(self, direct_vm, treasury, direct_owner):
+    def test_zero_value_deposit_reverts(self, direct_vm, treasury, direct_owner):
         direct_vm.sender = direct_owner
+        direct_vm.value = 0
         with direct_vm.expect_revert("Deposit amount must be positive"):
-            treasury.deposit(0)
-
-    def test_negative_deposit_reverts(self, direct_vm, treasury, direct_owner):
-        direct_vm.sender = direct_owner
-        with direct_vm.expect_revert("Deposit amount must be positive"):
-            treasury.deposit(-1)
+            treasury.deposit()
 
 
 # ===========================================================================
@@ -546,81 +590,151 @@ class TestAuditRegistry:
 # 8. fund_proposal
 # ===========================================================================
 
-class TestFundProposal:
-    def test_full_fund_lifecycle(self, direct_vm, treasury, direct_owner, direct_alice):
-        """Submit -> evaluate (APPROVED, TIER_3) -> deposit -> fund -> FUNDED."""
+class TestExecuteProposal:
+    def _mkw(self, direct_alice, **extra):
+        """Mock kwargs that publish a maintainer manifest binding the payout to Alice."""
+        base = dict(maintainer_present=True, maintainer_payout=str(direct_alice))
+        base.update(extra)
+        return base
+
+    def test_full_execute_lifecycle(self, direct_vm, treasury, direct_owner, direct_alice):
+        """Submit -> evaluate (APPROVED, TIER_2, maintainer verified) -> deposit -> execute."""
         pid = submit_and_evaluate(
             direct_vm, treasury, direct_alice,
             request=5_000 * ATTO,
-            spdx="MIT", commit_count=50,  # ACTIVE + MIT -> TIER_2
+            **self._mkw(direct_alice, spdx="MIT", commit_count=50),  # ACTIVE + MIT -> TIER_2
         )
+        p = treasury.get_proposal(pid)
+        assert p["status"] == "APPROVED"
+        assert p["maintainer_verified"] == "true"
+
+        fund_treasury(direct_vm, treasury, direct_owner, 5_000 * ATTO)
         direct_vm.sender = direct_owner
-        treasury.deposit(5_000 * ATTO)
-        treasury.fund_proposal(pid)
+        released = treasury.execute_proposal(pid)
+        assert released == 5_000 * ATTO
+
         p = treasury.get_proposal(pid)
         assert p["status"] == "FUNDED"
         assert treasury.get_treasury_balance() == 0
+        assert treasury.get_total_escrowed() == 5_000 * ATTO
+        assert treasury.get_claimable(str(direct_alice)) == 5_000 * ATTO
 
-    def test_fund_caps_at_tier_ceiling(self, direct_vm, treasury, direct_alice):
+    def test_recipient_can_execute(self, direct_vm, treasury, direct_owner, direct_alice):
+        pid = submit_and_evaluate(
+            direct_vm, treasury, direct_alice,
+            request=2_000 * ATTO, **self._mkw(direct_alice, spdx="MIT", commit_count=50),
+        )
+        fund_treasury(direct_vm, treasury, direct_owner, 2_000 * ATTO)
+        direct_vm.sender = direct_alice          # recipient triggers settlement
+        treasury.execute_proposal(pid)
+        assert treasury.get_proposal(pid)["status"] == "FUNDED"
+
+    def test_execute_requires_maintainer_verified(self, direct_vm, treasury, direct_owner, direct_alice):
+        """APPROVED but no maintainer manifest -> execution is refused (recipient unbound)."""
+        pid = submit_and_evaluate(
+            direct_vm, treasury, direct_alice,
+            request=2_000 * ATTO, spdx="MIT", commit_count=50, maintainer_present=False,
+        )
+        assert treasury.get_proposal(pid)["maintainer_verified"] == "false"
+        fund_treasury(direct_vm, treasury, direct_owner, 2_000 * ATTO)
+        direct_vm.sender = direct_owner
+        with direct_vm.expect_revert("not a verified repository maintainer"):
+            treasury.execute_proposal(pid)
+
+    def test_wrong_payout_address_is_not_verified(self, direct_vm, treasury, direct_alice, direct_bob):
+        """Manifest declares Bob's address, but Alice is the applicant -> unverified."""
+        pid = submit_and_evaluate(
+            direct_vm, treasury, direct_alice,
+            request=2_000 * ATTO, spdx="MIT", commit_count=50,
+            maintainer_present=True, maintainer_payout=str(direct_bob),
+        )
+        assert treasury.get_proposal(pid)["maintainer_verified"] == "false"
+
+    def test_execute_caps_at_tier_ceiling(self, direct_vm, treasury, direct_alice):
         """When requested > cap, allocated = cap. ACTIVE + non-OSI -> TIER_3."""
         pid = submit_and_evaluate(
             direct_vm, treasury, direct_alice,
             request=50_000 * ATTO,        # > CAP_3
-            spdx="PROPRIETARY", commit_count=50,
+            **self._mkw(direct_alice, spdx="PROPRIETARY", commit_count=50),
         )
         p = treasury.get_proposal(pid)
         assert p["tier"] == "TIER_3"
         assert p["allocated_amount"] == CAP_3
 
-    def test_fund_within_cap_uses_requested(self, direct_vm, treasury, direct_alice):
+    def test_execute_within_cap_uses_requested(self, direct_vm, treasury, direct_alice):
         request = 3_000 * ATTO   # < CAP_3
         pid = submit_and_evaluate(
             direct_vm, treasury, direct_alice,
-            request=request, spdx="PROPRIETARY", commit_count=50,  # TIER_3
+            request=request, **self._mkw(direct_alice, spdx="PROPRIETARY", commit_count=50),  # TIER_3
         )
         p = treasury.get_proposal(pid)
         assert p["allocated_amount"] == request
 
-    def test_non_owner_fund_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
-        pid = submit_and_evaluate(direct_vm, treasury, direct_alice, spdx="MIT", commit_count=50)
-        direct_vm.sender = direct_owner
-        treasury.deposit(2_000 * ATTO)
-        direct_vm.sender = direct_alice
-        with direct_vm.expect_revert("Only the owner can fund proposals"):
-            treasury.fund_proposal(pid)
+    def test_third_party_execute_reverts(self, direct_vm, treasury, direct_owner, direct_alice, direct_charlie):
+        pid = submit_and_evaluate(
+            direct_vm, treasury, direct_alice,
+            **self._mkw(direct_alice, spdx="MIT", commit_count=50),
+        )
+        fund_treasury(direct_vm, treasury, direct_owner, 2_000 * ATTO)
+        direct_vm.sender = direct_charlie
+        with direct_vm.expect_revert("Only the owner or the recipient can execute"):
+            treasury.execute_proposal(pid)
 
-    def test_unknown_proposal_fund_reverts(self, direct_vm, treasury, direct_owner):
+    def test_unknown_proposal_execute_reverts(self, direct_vm, treasury, direct_owner):
         direct_vm.sender = direct_owner
         with direct_vm.expect_revert("Unknown proposal"):
-            treasury.fund_proposal("prop_999")
+            treasury.execute_proposal("prop_999")
 
-    def test_fund_rejected_proposal_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
+    def test_execute_rejected_proposal_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
         pid = submit_and_evaluate(direct_vm, treasury, direct_alice, decision="REJECTED")
+        fund_treasury(direct_vm, treasury, direct_owner, 1_000 * ATTO)
         direct_vm.sender = direct_owner
-        treasury.deposit(1_000 * ATTO)
         with direct_vm.expect_revert("expected APPROVED"):
-            treasury.fund_proposal(pid)
+            treasury.execute_proposal(pid)
 
-    def test_fund_insufficient_balance_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
+    def test_execute_insufficient_balance_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
         request = 5_000 * ATTO
         pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice, request=request, spdx="MIT", commit_count=50,
+            direct_vm, treasury, direct_alice, request=request,
+            **self._mkw(direct_alice, spdx="MIT", commit_count=50),
         )
+        fund_treasury(direct_vm, treasury, direct_owner, 1 * ATTO)
         direct_vm.sender = direct_owner
-        treasury.deposit(1 * ATTO)
         with direct_vm.expect_revert("Insufficient treasury"):
-            treasury.fund_proposal(pid)
+            treasury.execute_proposal(pid)
 
-    def test_double_fund_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
+    def test_double_execute_reverts(self, direct_vm, treasury, direct_owner, direct_alice):
         request = 2_000 * ATTO
         pid = submit_and_evaluate(
-            direct_vm, treasury, direct_alice, request=request, spdx="MIT", commit_count=50,
+            direct_vm, treasury, direct_alice, request=request,
+            **self._mkw(direct_alice, spdx="MIT", commit_count=50),
         )
+        fund_treasury(direct_vm, treasury, direct_owner, 10_000 * ATTO)
         direct_vm.sender = direct_owner
-        treasury.deposit(10_000 * ATTO)
-        treasury.fund_proposal(pid)
+        treasury.execute_proposal(pid)
         with direct_vm.expect_revert("expected APPROVED"):
-            treasury.fund_proposal(pid)
+            treasury.execute_proposal(pid)
+
+    def test_withdraw_settles_recipient(self, direct_vm, treasury, direct_owner, direct_alice):
+        """Full settlement: execute -> claimable -> withdraw zeroes the escrow."""
+        pid = submit_and_evaluate(
+            direct_vm, treasury, direct_alice, request=4_000 * ATTO,
+            **self._mkw(direct_alice, spdx="MIT", commit_count=50),
+        )
+        fund_treasury(direct_vm, treasury, direct_owner, 4_000 * ATTO)
+        direct_vm.sender = direct_owner
+        treasury.execute_proposal(pid)
+
+        direct_vm.sender = direct_alice
+        withdrawn = treasury.withdraw()
+        assert withdrawn == 4_000 * ATTO
+        assert treasury.get_claimable(str(direct_alice)) == 0
+        assert treasury.get_total_escrowed() == 0
+
+    def test_withdraw_without_balance_reverts(self, direct_vm, treasury, direct_bob):
+        direct_vm.sender = direct_bob
+        with direct_vm.expect_revert("No claimable balance"):
+            treasury.withdraw()
 
 
 # ===========================================================================
@@ -677,6 +791,7 @@ class TestEvaluateProposalReverts:
         mock_commits(direct_vm, count=50)
         mock_contents(direct_vm)
         mock_audit_manifest(direct_vm, present=False)
+        mock_maintainer_manifest(direct_vm, present=False)
         direct_vm.mock_llm(LLM_ANCHOR, json.dumps({"decision": "MAYBE", "reasoning": "Uncertain"}))
         with direct_vm.expect_revert("[LLM_ERROR]"):
             treasury.evaluate_proposal(pid)
@@ -879,6 +994,7 @@ class TestCommitBrackets:
                      authors=authors, bots=bots)
         mock_contents(vm)
         mock_audit_manifest(vm, present=False)
+        mock_maintainer_manifest(vm, present=False)
         mock_llm(vm)
         treasury.evaluate_proposal(pid)
         vm.clear_mocks()

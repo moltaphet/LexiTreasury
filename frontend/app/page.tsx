@@ -13,7 +13,7 @@ import Footer from "@/components/Footer";
 
 const CONTRACT_ADDRESS =
   process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ??
-  "0x141FFe84339FA98E0237076B6f6a3262ce49c109";
+  "0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf";
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabId>("constitution");

@@ -3,11 +3,24 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   fetchAllProposals,
+  fetchTreasuryBalance,
+  fetchTotalEscrowed,
+  fetchClaimable,
+  depositToTreasury,
+  executeProposal,
+  withdrawFunds,
   attoToTokens,
   shortenAddress,
   shortenUrl,
 } from "@/lib/contract";
 import type { Proposal } from "@/lib/contract";
+import { useWallet } from "@/contexts/WalletContext";
+
+type TxState =
+  | { type: "idle" }
+  | { type: "pending" }
+  | { type: "success"; txHash: string }
+  | { type: "error"; message: string };
 
 /* ============================================================
    Status Badge
@@ -85,13 +98,38 @@ function EmptyState() {
 function DetailPanel({
   proposal,
   onClose,
+  onChanged,
 }: {
   proposal: Proposal;
   onClose: () => void;
+  onChanged: () => void;
 }) {
+  const wallet = useWallet();
+  const [tx, setTx] = useState<TxState>({ type: "idle" });
+
+  const maintainerVerified = proposal.maintainer_verified === "true";
+
+  async function handleExecute() {
+    if (!wallet.isConnected || !wallet.address) {
+      setTx({ type: "error", message: "Connect your wallet to execute this proposal." });
+      return;
+    }
+    setTx({ type: "pending" });
+    try {
+      await executeProposal(proposal.proposal_id, wallet.address);
+      setTx({ type: "success", txHash: "" });
+      onChanged();
+    } catch (e: unknown) {
+      setTx({ type: "error", message: e instanceof Error ? e.message : "Execution failed" });
+    }
+  }
+
   const fields = [
     { label: "GitHub URL",      value: proposal.github_url, isLink: true },
     { label: "Applicant",       value: proposal.applicant },
+    { label: "Payout Recipient", value: proposal.recipient || proposal.applicant },
+    { label: "Maintainer Verified", value: proposal.maintainer_verified || "--" },
+    { label: "Maintainer Login", value: proposal.maintainer_login || "--" },
     { label: "Requested",       value: `${attoToTokens(proposal.requested_amount)} tokens` },
     { label: "Allocated",       value: proposal.allocated_amount ? `${attoToTokens(proposal.allocated_amount)} tokens` : "--" },
     { label: "Commit Bracket",  value: proposal.commit_bracket || "--" },
@@ -154,6 +192,176 @@ function DetailPanel({
           </p>
         </div>
       )}
+
+      {/* Execute action (approved proposals only) */}
+      {proposal.status === "APPROVED" && (
+        <div className="glass-inset rounded-lg p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[10px] font-mono text-slate-600 uppercase tracking-wider">
+                Execute Funding
+              </p>
+              <p className="text-xs text-slate-400 mt-1">
+                Releases {attoToTokens(proposal.allocated_amount)} tokens into the
+                recipient&apos;s claimable escrow.
+              </p>
+            </div>
+            <button
+              onClick={handleExecute}
+              disabled={!maintainerVerified || tx.type === "pending"}
+              className="glow-btn px-4 py-2 rounded-lg text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+            >
+              {tx.type === "pending" ? "Executing..." : "Execute"}
+            </button>
+          </div>
+          {!maintainerVerified && (
+            <p className="text-[11px] font-mono text-amber-400/80">
+              Recipient is not a verified repository maintainer -- funding is blocked.
+            </p>
+          )}
+          {tx.type === "success" && (
+            <p className="text-[11px] font-mono text-emerald-400">
+              Executed. Funds are now claimable by the recipient.
+            </p>
+          )}
+          {tx.type === "error" && (
+            <p className="text-[11px] font-mono text-red-400 break-all">{tx.message}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   Treasury Panel - deposit / withdraw / live balances
+   ============================================================ */
+function TreasuryPanel() {
+  const wallet = useWallet();
+  const [reserve, setReserve]     = useState<string>("0");
+  const [escrowed, setEscrowed]   = useState<string>("0");
+  const [claimable, setClaimable] = useState<string>("0");
+  const [amount, setAmount]       = useState<string>("");
+  const [depositTx, setDepositTx]   = useState<TxState>({ type: "idle" });
+  const [withdrawTx, setWithdrawTx] = useState<TxState>({ type: "idle" });
+
+  const load = useCallback(() => {
+    fetchTreasuryBalance().then(setReserve).catch(() => {});
+    fetchTotalEscrowed().then(setEscrowed).catch(() => {});
+    if (wallet.address) {
+      fetchClaimable(wallet.address).then(setClaimable).catch(() => setClaimable("0"));
+    } else {
+      setClaimable("0");
+    }
+  }, [wallet.address]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function handleDeposit() {
+    if (!wallet.isConnected || !wallet.address) {
+      setDepositTx({ type: "error", message: "Connect your wallet to deposit." });
+      return;
+    }
+    const amt = parseFloat(amount);
+    if (isNaN(amt) || amt <= 0) {
+      setDepositTx({ type: "error", message: "Enter a positive token amount." });
+      return;
+    }
+    setDepositTx({ type: "pending" });
+    try {
+      await depositToTreasury(amt, wallet.address);
+      setDepositTx({ type: "success", txHash: "" });
+      setAmount("");
+      load();
+    } catch (e: unknown) {
+      setDepositTx({ type: "error", message: e instanceof Error ? e.message : "Deposit failed" });
+    }
+  }
+
+  async function handleWithdraw() {
+    if (!wallet.isConnected || !wallet.address) {
+      setWithdrawTx({ type: "error", message: "Connect your wallet to withdraw." });
+      return;
+    }
+    setWithdrawTx({ type: "pending" });
+    try {
+      await withdrawFunds(wallet.address);
+      setWithdrawTx({ type: "success", txHash: "" });
+      load();
+    } catch (e: unknown) {
+      setWithdrawTx({ type: "error", message: e instanceof Error ? e.message : "Withdraw failed" });
+    }
+  }
+
+  const hasClaimable = (() => {
+    try { return BigInt(claimable) > BigInt(0); } catch { return false; }
+  })();
+
+  return (
+    <div className="glass-glow rounded-xl p-5 space-y-4">
+      <div className="flex items-center gap-3">
+        <div className="accent-bar" />
+        <h2 className="text-base font-semibold text-white">Treasury</h2>
+      </div>
+
+      {/* Balances */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {[
+          { label: "Reserve", value: attoToTokens(reserve), accent: "text-cyan-400" },
+          { label: "In Escrow", value: attoToTokens(escrowed), accent: "text-violet-300" },
+          { label: "Your Claimable", value: attoToTokens(claimable), accent: "text-emerald-400" },
+        ].map(({ label, value, accent }) => (
+          <div key={label} className="glass-inset rounded-lg px-3 py-2.5 space-y-1">
+            <p className="text-[10px] font-mono text-slate-600 uppercase tracking-wider">{label}</p>
+            <p className={`text-sm font-mono font-semibold ${accent}`}>{value} tokens</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Deposit + Withdraw */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        <div className="flex-1 flex gap-2">
+          <input
+            type="number"
+            min="0"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            placeholder="Amount (tokens)"
+            className="flex-1 glass-inset rounded-lg px-3 py-2 text-xs font-mono text-slate-200 bg-transparent border border-slate-700/60 focus:border-cyan-400/40 outline-none"
+          />
+          <button
+            onClick={handleDeposit}
+            disabled={depositTx.type === "pending"}
+            className="glow-btn px-4 py-2 rounded-lg text-xs font-bold disabled:opacity-40 shrink-0"
+          >
+            {depositTx.type === "pending" ? "Depositing..." : "Deposit"}
+          </button>
+        </div>
+        <button
+          onClick={handleWithdraw}
+          disabled={!hasClaimable || withdrawTx.type === "pending"}
+          className="px-4 py-2 rounded-lg glass border border-emerald-400/25 text-emerald-300 hover:border-emerald-400/50 transition-all text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+        >
+          {withdrawTx.type === "pending" ? "Withdrawing..." : "Withdraw Claimable"}
+        </button>
+      </div>
+
+      {/* Status lines */}
+      {depositTx.type === "error" && (
+        <p className="text-[11px] font-mono text-red-400 break-all">{depositTx.message}</p>
+      )}
+      {depositTx.type === "success" && (
+        <p className="text-[11px] font-mono text-emerald-400">Deposit confirmed.</p>
+      )}
+      {withdrawTx.type === "error" && (
+        <p className="text-[11px] font-mono text-red-400 break-all">{withdrawTx.message}</p>
+      )}
+      {withdrawTx.type === "success" && (
+        <p className="text-[11px] font-mono text-emerald-400">Withdrawal confirmed.</p>
+      )}
+      <p className="text-[10px] font-mono text-slate-600">
+        Note: deposit is owner-only; the transaction will revert for non-owner accounts.
+      </p>
     </div>
   );
 }
@@ -180,6 +388,8 @@ export default function ProposalsTab() {
 
   return (
     <div className="space-y-6">
+      <TreasuryPanel />
+
       {/* Toolbar */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -291,7 +501,11 @@ export default function ProposalsTab() {
       )}
 
       {selected && (
-        <DetailPanel proposal={selected} onClose={() => setSelected(null)} />
+        <DetailPanel
+          proposal={selected}
+          onClose={() => setSelected(null)}
+          onChanged={() => { setSelected(null); load(); }}
+        />
       )}
     </div>
   );

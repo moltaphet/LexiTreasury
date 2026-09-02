@@ -68,7 +68,19 @@ def _commits_body(n, authors=DEFAULT_AUTHORS, bots=False):
 def mock_repo(vm, spdx="MIT", topics=None, status=200):
     vm.mock_web(rf".*api\.github\.com/repos/{OWNER}/{REPO}$",
                 {"status": status, "body": json.dumps({"license": {"spdx_id": spdx},
-                                                       "topics": topics or []})})
+                                                       "topics": topics or [],
+                                                       "owner": {"login": OWNER}})})
+
+
+def mock_maintainer(vm, present=False, payout_address=None, declared_owner=OWNER):
+    """Mock the well-known treasury manifest binding a payout address to the repo owner."""
+    url = rf".*raw\.githubusercontent\.com/{OWNER}/{REPO}/HEAD/\.well-known/genlayer-treasury\.json"
+    if not present:
+        vm.mock_web(url, {"status": 404, "body": "nf"})
+        return
+    vm.mock_web(url, {"status": 200,
+                      "body": json.dumps({"owner": declared_owner,
+                                          "payout_address": str(payout_address)})})
 
 
 def mock_commits(vm, count=50, veteran=False, page1_status=200, authors=DEFAULT_AUTHORS, bots=False):
@@ -105,11 +117,13 @@ def mock_llm(vm, decision="APPROVED", reasoning="ok"):
 
 
 def setup(vm, spdx="MIT", topics=None, commit_count=50, veteran=False, authors=DEFAULT_AUTHORS,
-          bots=False, contents=None, audit_present=False, decision="APPROVED", **audit_kwargs):
+          bots=False, contents=None, audit_present=False, decision="APPROVED",
+          maintainer_present=False, maintainer_payout=None, **audit_kwargs):
     mock_repo(vm, spdx=spdx, topics=topics)
     mock_commits(vm, count=commit_count, veteran=veteran, authors=authors, bots=bots)
     mock_contents(vm, items=contents)
     mock_audit_manifest(vm, present=audit_present, **audit_kwargs)
+    mock_maintainer(vm, present=maintainer_present, payout_address=maintainer_payout)
     mock_llm(vm, decision=decision)
 
 
@@ -160,6 +174,7 @@ class TestPromptInjection:
         mock_commits(direct_vm, count=50)
         mock_contents(direct_vm)
         mock_audit_manifest(direct_vm, present=False)
+        mock_maintainer(direct_vm, present=False)
 
         direct_vm.sender = direct_alice
         pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
@@ -306,6 +321,7 @@ class TestFakeCommitActivity:
                            {"status": 200, "body": body})
         mock_contents(direct_vm)
         mock_audit_manifest(direct_vm, present=False)
+        mock_maintainer(direct_vm, present=False)
         mock_llm(direct_vm)
         treasury.evaluate_proposal(pid)
         direct_vm.clear_mocks()
@@ -349,6 +365,7 @@ class TestFailClosedConsensus:
         mock_commits(direct_vm, count=50)
         mock_contents(direct_vm)
         mock_audit_manifest(direct_vm, present=False)
+        mock_maintainer(direct_vm, present=False)
         # decision key missing entirely -> fail-closed LLM error, never a silent approval.
         direct_vm.mock_llm(LLM_ANCHOR, json.dumps({"verdict": "yes"}))
         with direct_vm.expect_revert("[LLM_ERROR]"):
@@ -362,6 +379,7 @@ class TestFailClosedConsensus:
         mock_commits(direct_vm, count=100, veteran=True)
         mock_contents(direct_vm, status=500)          # quality source unavailable
         mock_audit_manifest(direct_vm, present=False)
+        mock_maintainer(direct_vm, present=False)
         mock_llm(direct_vm, decision="APPROVED")
 
         direct_vm.sender = direct_alice

@@ -8,11 +8,17 @@
   },
   "contract": {
     "name": "LexiTreasury",
-    "version": "2.0-hardened",
+    "version": "3.0-lifecycle",
     "source": "contracts/lexitreasury.py",
+    "address": "0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf",
+    "deploy_tx": "0x9d9474577c26c44d661c920b5ffb5bab75ac07b482bd4194ef48288008a72251",
+    "deployed_at": "2026-09-02"
+  },
+  "previous_contract": {
     "address": "0x141FFe84339FA98E0237076B6f6a3262ce49c109",
     "deploy_tx": "0x17e176afdbe8a195b5ed1a02bf4ea9246df8cd2b6d91561f58b7fdc947cb89e3",
-    "deployed_at": "2026-09-01"
+    "deployed_at": "2026-09-01",
+    "note": "Superseded: pre-lifecycle (no payable deposit / execute_proposal / withdraw / maintainer binding)"
   },
   "constructor_args": {
     "constitution": "Projects must demonstrate active open-source development. Minimum ACTIVE commit bracket required. An OSI-approved license is mandatory for any funding. Structural engineering quality (test suite, CI, build manifest) is required; raw commit volume alone does not qualify. Bot-only or single-author commit histories are disqualified from top-tier funding. Security audits count only when verified via an on-chain attestation from a trusted auditor. Tier 1 requires MATURE or VETERAN activity plus an OSI license, an on-chain-verified audit, standard-or-better structural quality, and a genuine multi-contributor base. Tier 2 requires ACTIVE or better activity plus either an OSI license or a verified audit. Tier 3 requires MINIMAL or better activity plus valid structural quality. Projects with zero commits receive no allocation regardless of decision.",
@@ -26,13 +32,20 @@
     "anti_gaming_quality_bracket": true,
     "anti_gaming_contributor_bracket": true,
     "onchain_audit_attestation": true,
-    "fail_closed_consensus": true
+    "fail_closed_consensus": true,
+    "repository_owner_maintainer_binding": true,
+    "claimable_escrow_accounting": true
+  },
+  "lifecycle": {
+    "payable_deposit": true,
+    "execute_proposal": true,
+    "withdraw": true,
+    "no_pending_after_approval": true
   },
   "tests": {
-    "total": 134,
-    "core": 114,
-    "adversarial": 20,
-    "all_passing": true
+    "total": 238,
+    "all_passing": true,
+    "direct_mode": true
   },
   "consensus": {
     "validators_agreed": 5,
