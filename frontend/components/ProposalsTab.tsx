@@ -7,6 +7,7 @@ import {
   fetchTotalEscrowed,
   fetchClaimable,
   depositToTreasury,
+  evaluateProposal,
   executeProposal,
   withdrawFunds,
   attoToTokens,
@@ -106,8 +107,48 @@ function DetailPanel({
 }) {
   const wallet = useWallet();
   const [tx, setTx] = useState<TxState>({ type: "idle" });
+  const [evalTx, setEvalTx] = useState<TxState>({ type: "idle" });
+  const [evalStage, setEvalStage] = useState(0);
 
   const maintainerVerified = proposal.maintainer_verified === "true";
+  const isPending = proposal.status === "PENDING";
+
+  // Cycle through consensus-stage messages while the evaluation tx is in flight
+  // so the judge sees the AI-validator pipeline progressing, not a dead spinner.
+  const EVAL_STAGES = [
+    "Fetching live GitHub signals...",
+    "AI Validators Evaluating...",
+    "Scoring against DAO constitution...",
+    "Reaching Consensus...",
+  ];
+  useEffect(() => {
+    if (evalTx.type !== "pending") {
+      setEvalStage(0);
+      return;
+    }
+    const id = setInterval(() => {
+      setEvalStage((s) => (s + 1) % EVAL_STAGES.length);
+    }, 4000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [evalTx.type]);
+
+  async function handleEvaluate() {
+    if (!wallet.isConnected || !wallet.address) {
+      setEvalTx({ type: "error", message: "Connect your wallet to run the evaluation." });
+      return;
+    }
+    setEvalTx({ type: "pending" });
+    try {
+      await evaluateProposal(proposal.proposal_id, wallet.address);
+      setEvalTx({ type: "success", txHash: "" });
+      // Refresh the list -- consensus has decided, so the row flips to
+      // APPROVED / REJECTED and the Fund action appears automatically.
+      onChanged();
+    } catch (e: unknown) {
+      setEvalTx({ type: "error", message: e instanceof Error ? e.message : "Evaluation failed" });
+    }
+  }
 
   async function handleExecute() {
     if (!wallet.isConnected || !wallet.address) {
@@ -190,6 +231,46 @@ function DetailPanel({
           <p className="text-xs text-slate-400 leading-relaxed">
             {proposal.evaluation_reasoning}
           </p>
+        </div>
+      )}
+
+      {/* AI Evaluation action (pending proposals only) */}
+      {isPending && (
+        <div className="glass-inset rounded-lg p-4 space-y-3 border border-cyan-400/20">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[10px] font-mono text-cyan-400/70 uppercase tracking-wider">
+                AI Governance
+              </p>
+              <p className="text-xs text-slate-400 mt-1">
+                This proposal is awaiting evaluation. Run the AI-validator
+                consensus to score it against the DAO constitution and transition
+                it to <span className="text-emerald-400">Approved</span> or{" "}
+                <span className="text-red-400">Rejected</span>.
+              </p>
+            </div>
+            <button
+              onClick={handleEvaluate}
+              disabled={evalTx.type === "pending"}
+              className="glow-btn px-4 py-2 rounded-lg text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+            >
+              {evalTx.type === "pending" ? "Evaluating..." : "Run AI Evaluation"}
+            </button>
+          </div>
+          {evalTx.type === "pending" && (
+            <div className="flex items-center gap-2 text-[11px] font-mono text-cyan-300">
+              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+              {EVAL_STAGES[evalStage]}
+            </div>
+          )}
+          {evalTx.type === "success" && (
+            <p className="text-[11px] font-mono text-emerald-400">
+              Consensus reached. Verdict recorded on-chain.
+            </p>
+          )}
+          {evalTx.type === "error" && (
+            <p className="text-[11px] font-mono text-red-400 break-all">{evalTx.message}</p>
+          )}
         </div>
       )}
 
@@ -370,10 +451,13 @@ function TreasuryPanel() {
    Main Component
    ============================================================ */
 export default function ProposalsTab() {
+  const wallet = useWallet();
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState<string | null>(null);
   const [selected, setSelected]   = useState<Proposal | null>(null);
+  const [evaluatingId, setEvaluatingId] = useState<string | null>(null);
+  const [rowError, setRowError]   = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -385,6 +469,28 @@ export default function ProposalsTab() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Inline evaluate straight from the list row -- runs the AI-validator
+  // consensus and refreshes so the row flips to APPROVED / REJECTED in place.
+  const handleRowEvaluate = useCallback(
+    async (proposalId: string) => {
+      setRowError(null);
+      if (!wallet.isConnected || !wallet.address) {
+        setRowError("Connect your wallet to run the AI evaluation.");
+        return;
+      }
+      setEvaluatingId(proposalId);
+      try {
+        await evaluateProposal(proposalId, wallet.address);
+        load();
+      } catch (e: unknown) {
+        setRowError(e instanceof Error ? e.message : "Evaluation failed");
+      } finally {
+        setEvaluatingId(null);
+      }
+    },
+    [wallet.isConnected, wallet.address, load]
+  );
 
   return (
     <div className="space-y-6">
@@ -424,6 +530,23 @@ export default function ProposalsTab() {
         </div>
       )}
 
+      {rowError && (
+        <div className="glass-glow rounded-xl p-4 border border-red-500/20 text-red-400 font-mono text-xs flex items-start gap-3">
+          <svg className="w-4 h-4 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          {rowError}
+        </div>
+      )}
+
+      {evaluatingId && (
+        <div className="glass-glow rounded-xl p-4 border border-cyan-400/20 text-cyan-300 font-mono text-xs flex items-center gap-3">
+          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+          AI Validators Evaluating proposal #{evaluatingId} -- reaching consensus...
+        </div>
+      )}
+
       {loading && (
         <div className="space-y-2">
           {[...Array(3)].map((_, i) => (
@@ -440,7 +563,7 @@ export default function ProposalsTab() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800/60">
-                  {["ID", "GitHub Repo", "Applicant", "Requested", "Tier", "Status"].map((h, idx) => (
+                  {["ID", "GitHub Repo", "Applicant", "Requested", "Tier", "Status", "Action"].map((h, idx) => (
                     <th
                       key={h}
                       className={`px-5 py-3.5 text-[10px] font-mono text-slate-600 uppercase tracking-widest font-medium ${
@@ -490,6 +613,22 @@ export default function ProposalsTab() {
                       </td>
                       <td className="px-5 py-3.5 text-center">
                         <StatusBadge status={p.status} />
+                      </td>
+                      <td className="px-5 py-3.5 text-center">
+                        {p.status === "PENDING" ? (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRowEvaluate(p.proposal_id);
+                            }}
+                            disabled={evaluatingId !== null}
+                            className="glow-btn px-3 py-1.5 rounded-lg text-[10px] font-bold disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                          >
+                            {evaluatingId === p.proposal_id ? "Evaluating..." : "Run AI Evaluation"}
+                          </button>
+                        ) : (
+                          <span className="text-slate-700 font-mono text-[11px]">--</span>
+                        )}
                       </td>
                     </tr>
                   );

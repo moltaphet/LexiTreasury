@@ -19,14 +19,52 @@
 | Network          | GenLayer StudioNet                                           |
 | Chain ID         | 61999                                                        |
 | RPC URL          | `https://studio.genlayer.com/api`                            |
-| Contract Version | 2.0 (security-hardened)                                      |
-| Contract Address | `0x141FFe84339FA98E0237076B6f6a3262ce49c109`                |
-| Deploy TX        | `0x17e176afdbe8a195b5ed1a02bf4ea9246df8cd2b6d91561f58b7fdc947cb89e3` |
+| Contract Version | 3.0 (lifecycle + security-hardened)                         |
+| Contract Address | `0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf`                |
+| Deploy TX        | `0x9d9474577c26c44d661c920b5ffb5bab75ac07b482bd4194ef48288008a72251` |
 | Deployer         | `0xc479950e82de5920b6650632b148a8ddfa21ebb1`                |
-| Deployed At      | 2026-09-01                                                   |
+| Deployed At      | 2026-09-02                                                   |
 | Validators       | 5 / 5 (100% consensus at deploy)                            |
 | Tests            | 134 passing (114 core + 20 adversarial)                     |
 | Explorer         | https://studio.genlayer.com                                  |
+
+---
+
+## Judge Quickstart
+
+Complete the **entire** application path — `Submit -> Evaluate -> Fund -> Payout` —
+directly from the live dashboard. No CLI, no out-of-band scripts.
+
+> **Live dashboard:** `<YOUR_VERCEL_URL>` (replace with the deployed Vercel URL)
+
+1. **Connect & Submit.** Open the dashboard, click **Connect Wallet** (MetaMask on
+   StudioNet, Chain ID `61999`), go to the **Submit Proposal** tab, paste a GitHub
+   repo URL and a requested amount, and submit. The proposal appears in the
+   **Proposals** tab as `PENDING`.
+2. **Run AI Evaluation.** In the Proposals list, click **Run AI Evaluation** on the
+   pending row (or open the row and use the panel button). The UI shows the
+   AI-validator consensus progressing (*"AI Validators Evaluating..."* →
+   *"Reaching Consensus..."*), then the row flips itself to `APPROVED` or
+   `REJECTED` with a tier — no refresh needed.
+3. **Fund & Payout.** For an `APPROVED` proposal the **Execute** button becomes
+   available immediately: deposit into the treasury (Treasury panel, owner-only),
+   click **Execute** to move the allocation into the recipient's claimable escrow
+   (`FUNDED`), then **Withdraw Claimable** pays it out to the recipient wallet.
+
+### Headless witness (optional)
+
+A single checked-in command drives the same on-chain path programmatically against
+the live contract:
+
+```bash
+cd frontend
+npm install
+E2E_PRIVATE_KEY=0x<studionet-funded-owner-key> npm run verify:e2e
+# optional: GITHUB_URL=https://github.com/org/repo REQUESTED=1000 npm run verify:e2e
+```
+
+It prints each stage (`1/4 SUBMIT`, `2/4 EVALUATE`, `3/4 FUND`, `4/4 PAYOUT`),
+waiting for real consensus between steps, and exits non-zero on any failure.
 
 ---
 
@@ -360,7 +398,7 @@ npm install
 
 ```bash
 # frontend/.env.local (already present in this repo)
-NEXT_PUBLIC_CONTRACT_ADDRESS=0x141FFe84339FA98E0237076B6f6a3262ce49c109
+NEXT_PUBLIC_CONTRACT_ADDRESS=0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf
 NEXT_PUBLIC_RPC_URL=https://studio.genlayer.com/api
 NEXT_PUBLIC_CHAIN_ID=61999
 NEXT_PUBLIC_EXPLORER_URL=https://studio.genlayer.com
@@ -403,20 +441,20 @@ The contract is also fully accessible through the genlayer CLI:
 genlayer network set studionet
 
 # Read the DAO constitution
-genlayer call 0x141FFe84339FA98E0237076B6f6a3262ce49c109 get_constitution
+genlayer call 0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf get_constitution
 
 # Read tier caps
-genlayer call 0x141FFe84339FA98E0237076B6f6a3262ce49c109 get_tier_caps
+genlayer call 0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf get_tier_caps
 
 # Read all proposals
-genlayer call 0x141FFe84339FA98E0237076B6f6a3262ce49c109 get_all_proposals
+genlayer call 0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf get_all_proposals
 
 # Submit a proposal (requires a funded StudioNet account)
-genlayer write 0x141FFe84339FA98E0237076B6f6a3262ce49c109 submit_proposal \
+genlayer write 0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf submit_proposal \
   --args "https://github.com/your-org/your-repo" 1000000000000000000000
 
-# Trigger evaluation (owner-callable on StudioNet)
-genlayer write 0x141FFe84339FA98E0237076B6f6a3262ce49c109 evaluate_proposal \
+# Trigger evaluation (callable by any account on StudioNet)
+genlayer write 0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf evaluate_proposal \
   --args "prop_1"
 ```
 

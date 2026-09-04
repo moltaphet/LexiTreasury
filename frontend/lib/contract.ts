@@ -1,5 +1,5 @@
 import { createClient, chains } from "genlayer-js";
-import type { Address } from "genlayer-js/types";
+import type { Address, Hash } from "genlayer-js/types";
 
 const CONTRACT_ADDRESS =
   (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as Address) ??
@@ -175,6 +175,43 @@ export async function depositToTreasury(
     args: [],
     value: amountAtto,
   });
+  return txHash as `0x${string}`;
+}
+
+// Block until a transaction reaches a decided (finalized/accepted) state so the
+// caller can safely refresh on-chain reads afterwards. Uses the read client so
+// no wallet/signing is involved. Swallows polling errors -- the worst case is
+// the UI refresh happening a moment early.
+export async function waitForReceipt(txHash: `0x${string}`): Promise<void> {
+  try {
+    const client = readClient();
+    await client.waitForTransactionReceipt({
+      hash: txHash as unknown as Hash,
+      interval: 3000,
+      retries: 40,
+    });
+  } catch {
+    /* consensus polling timed out or errored -- caller falls back to refresh */
+  }
+}
+
+// evaluate_proposal runs the AI-validator consensus pipeline against a PENDING
+// proposal: the leader fetches live GitHub signals, validators independently
+// re-run the identical pipeline, and consensus fixes the proposal to APPROVED or
+// REJECTED (with a deterministic tier). Callable by any account. Resolves only
+// after the transaction reaches consensus so a subsequent read sees the verdict.
+export async function evaluateProposal(
+  proposalId: string,
+  address: string
+): Promise<`0x${string}`> {
+  const client = writeClient(address);
+  const txHash = await client.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "evaluate_proposal",
+    args: [proposalId],
+    value: BigInt(0),
+  });
+  await waitForReceipt(txHash as `0x${string}`);
   return txHash as `0x${string}`;
 }
 
