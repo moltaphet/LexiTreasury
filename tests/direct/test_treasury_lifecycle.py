@@ -1,29 +1,15 @@
-"""
-LexiTreasury - End-to-End Treasury Lifecycle Test Suite
+"""Direct tests for the unified milestone-based LexiTreasury money lifecycle.
 
-Proves the complete on-chain money path a steward can audit end to end:
-
-    deposit -> submit -> evaluate (with repository-owner verification) -> execute -> withdraw
-
-using genlayer-test direct mode cheatcodes only (direct_vm.mock_web,
-direct_vm.mock_llm, direct_vm.warp, payable deposits via direct_vm.value, and
-multi-validator consensus via direct_vm.run_validator).
-
-Accounting model under test (strict integer atto-math, u256):
-  - deposit() credits gl.message.value into the unallocated treasury reserve.
-  - execute_proposal() moves an APPROVED allocation out of the reserve into the
-    recipient's claimable escrow; the recipient must be bound to the repository
-    owner extracted from the GitHub evidence payload (maintainer_verified).
-  - withdraw() pays the recipient's claimable escrow out of the contract.
-  - Invariant at every step: contract holdings == treasury_balance + total_escrowed,
-    and no approved proposal is ever left stuck in PENDING.
-
-This module is self-contained: tests/direct has no shared conftest.
+The suite covers reserve deposits, repository evaluation and maintainer binding,
+full-plan escrow, milestone adjudication, tranche release, recipient withdrawals,
+and conservation across independent grants. It uses only local direct-mode mocks;
+there are no live network requests or deployed transactions.
 """
 
 import json
 import hashlib
 import re
+import datetime
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -123,13 +109,13 @@ def mock_maintainer(vm, present=False, payout_address=None, declared_owner=OWNER
 
 
 def mock_llm(vm, decision="APPROVED", reasoning="Meets constitution"):
-    vm.mock_llm(LLM_ANCHOR, json.dumps({"decision": decision, "reasoning": reasoning}))
+    vm._review_response = json.dumps({"decision": decision, "reasoning": reasoning})
 
 
 def setup_all(vm, recipient, spdx="MIT", commit_count=50, veteran=False,
               authors=DEFAULT_AUTHORS, audit_present=False, maintainer_present=True,
               maintainer_payout=None, decision="APPROVED"):
-    """Register every mock needed for a single evaluate_proposal call."""
+    """Register the repository and policy mocks for one evaluate_grant call."""
     mock_repo(vm, spdx=spdx)
     mock_commits(vm, count=commit_count, veteran=veteran, authors=authors)
     mock_contents(vm)
@@ -158,8 +144,10 @@ def deposit(treasury, vm, owner, amount):
 
 
 def assert_holdings_invariant(treasury):
-    """Contract holdings are always the reserve plus the outstanding escrow."""
-    # No funds are created or destroyed by execution; they only move between buckets.
+    """Lifetime deposits equal reserve, funded escrow, and cumulative tranche release."""
+    accounting = treasury.get_accounting()
+    assert (accounting["treasury_balance"] + accounting["grant_escrow"]
+            + accounting["total_released"] == 8_000 * ATTO)
     assert treasury.get_treasury_balance() >= 0
     assert treasury.get_total_escrowed() >= 0
 
@@ -169,9 +157,54 @@ def assert_holdings_invariant(treasury):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def treasury(direct_vm, direct_deploy, direct_owner):
+def treasury(direct_vm, direct_deploy, direct_owner, monkeypatch):
+    direct_vm.warp("2030-01-01T00:00:00Z")
     direct_vm.sender = direct_owner
-    return direct_deploy(CONTRACT, CONSTITUTION, CAP_1, CAP_2, CAP_3)
+    # Lifecycle security tests run with strict repository-maintainer verification.
+    contract = direct_deploy(CONTRACT, CONSTITUTION, CAP_1, CAP_2, CAP_3, False)
+    import genlayer as gl
+    monkeypatch.setattr(gl.vm, "get_timestamp", lambda: datetime.datetime.fromisoformat(
+        direct_vm._datetime.replace("Z", "+00:00")))
+    monkeypatch.setattr(gl.nondet, "exec_prompt", lambda _prompt, **_kwargs: json.loads(
+        getattr(direct_vm, "_review_response", '{"decision":"APPROVED","reasoning":"ok"}')))
+    return contract
+
+
+def create_grant(treasury, vm, applicant, milestones, recipient=None):
+    vm.sender = applicant
+    return treasury.create_grant("Treasury lifecycle", GH_URL,
+                                 str(recipient if recipient is not None else applicant),
+                                 json.dumps(milestones))
+
+
+def approve_and_fund(treasury, vm, owner, applicant, amount, recipient=None, **setup_options):
+    setup_all(vm, recipient if recipient is not None else applicant, **setup_options)
+    grant_id = create_grant(treasury, vm, applicant, [
+        {"title": "Release", "criteria": "Ship tested release code.",
+         "amount": str(amount), "deadline": 2051222400}], recipient)
+    treasury.evaluate_grant(grant_id)
+    vm.clear_mocks()
+    assert treasury.get_grant(grant_id)["status"] == "APPROVED"
+    vm.sender = owner
+    treasury.fund_grant(grant_id)
+    return grant_id
+
+
+def approve_milestone(treasury, vm, grant_id, recipient, sha, monkeypatch):
+    vm.sender = recipient
+    treasury.submit_evidence(grant_id, f"{GH_URL}/commit/{sha}")
+    vm.mock_web(rf".*api\.github\.com/repos/{OWNER}/{REPO}/commits/{sha}$", {
+        "status": 200, "body": json.dumps({"sha": sha,
+            "commit": {"message": "Ship tested release", "author": {"date": "2030-01-02T00:00:00Z"}},
+            "files": [{"filename": "tests/test_release.py", "status": "added", "additions": 4,
+                       "deletions": 0, "patch": "+assert release"}]}),
+    })
+    import genlayer as gl
+    monkeypatch.setattr(gl.nondet, "exec_prompt", lambda _prompt, **_kwargs: {
+        "decision": "APPROVE", "reason_code": "CRITERIA_MET", "summary": "Release criteria met.",
+    })
+    treasury.adjudicate(grant_id)
+    return treasury.release_tranche(grant_id)
 
 
 # ===========================================================================
@@ -179,9 +212,8 @@ def treasury(direct_vm, direct_deploy, direct_owner):
 # ===========================================================================
 
 class TestFullLifecycle:
-    def test_deposit_submit_evaluate_execute_withdraw(
-        self, direct_vm, treasury, direct_owner, direct_alice
-    ):
+    def test_deposit_create_evaluate_fund_release_withdraw(self, direct_vm, treasury,
+                                                            direct_owner, direct_alice, monkeypatch):
         """The complete money path a steward can audit, asserting accounting at each step."""
         # A stable block timestamp for the whole lifecycle.
         direct_vm.warp("2026-09-02T12:00:00Z")
@@ -191,53 +223,62 @@ class TestFullLifecycle:
         assert treasury.get_treasury_balance() == 8_000 * ATTO
         assert treasury.get_total_escrowed() == 0
 
-        # --- Step 2: Applicant submits a proposal (recipient == applicant == repo owner) ---
+        # --- Step 2: Applicant commits a two-step milestone plan ---
         direct_vm.sender = direct_alice
         setup_all(direct_vm, direct_alice, spdx="MIT", commit_count=50)  # ACTIVE + MIT -> TIER_2
-        pid = treasury.submit_proposal(GH_URL, 5_000 * ATTO)
-        p = treasury.get_proposal(pid)
-        assert p["status"] == "PENDING"
-        assert p["recipient"] == str(direct_alice)
+        pid = create_grant(treasury, direct_vm, direct_alice, [
+            {"title": "Tested storage", "criteria": "Add tested indexed storage.",
+             "amount": str(3_000 * ATTO), "deadline": 2051222400},
+            {"title": "Documented API", "criteria": "Publish a documented API with tests.",
+             "amount": str(2_000 * ATTO), "deadline": 2082758400},
+        ])
+        p = treasury.get_grant(pid)
+        assert p["status"] == "DRAFT"
+        assert p["recipient"] == str(direct_alice).lower()
 
         # --- Step 3: Evaluate under consensus (LLM approves, maintainer verified) ---
-        treasury.evaluate_proposal(pid)
+        treasury.evaluate_grant(pid)
         # Multi-validator consensus: independent validators re-run and must agree.
         assert direct_vm.run_validator() is True
         assert direct_vm.run_validator() is True
         direct_vm.clear_mocks()
 
-        p = treasury.get_proposal(pid)
-        assert p["status"] == "APPROVED", "approval must not leave the proposal PENDING"
+        p = treasury.get_grant(pid)
+        assert p["status"] == "APPROVED"
         assert p["tier"] == "TIER_2"
         assert p["maintainer_verified"] == "true"
         assert p["maintainer_login"] == OWNER
         assert p["allocated_amount"] == 5_000 * ATTO
 
-        # --- Step 4: Execute -> funds move from reserve into claimable escrow ---
+        # --- Step 4: Fund the full precommitted plan into escrow ---
         direct_vm.sender = direct_owner
-        released = treasury.execute_proposal(pid)
-        assert released == 5_000 * ATTO
+        funded = treasury.fund_grant(pid)
+        assert funded == 5_000 * ATTO
 
-        p = treasury.get_proposal(pid)
+        p = treasury.get_grant(pid)
         assert p["status"] == "FUNDED"
         assert treasury.get_treasury_balance() == 3_000 * ATTO      # 8k - 5k reserve
-        assert treasury.get_total_escrowed() == 5_000 * ATTO
-        assert treasury.get_claimable(str(direct_alice)) == 5_000 * ATTO
+        assert treasury.get_accounting()["grant_escrow"] == 5_000 * ATTO
+        assert treasury.get_total_escrowed() == 0
         assert_holdings_invariant(treasury)
 
-        # --- Step 5: Recipient withdraws -> end-to-end settlement ---
+        # --- Step 5: Commit evidence adjudication releases only tranche one ---
+        direct_vm.sender = direct_alice
+        released = approve_milestone(treasury, direct_vm, pid, direct_alice, "a" * 40, monkeypatch)
+        assert released == 3_000 * ATTO
+        assert treasury.get_claimable(str(direct_alice)) == 3_000 * ATTO
         direct_vm.sender = direct_alice
         withdrawn = treasury.withdraw()
-        assert withdrawn == 5_000 * ATTO
+        assert withdrawn == 3_000 * ATTO
         assert treasury.get_claimable(str(direct_alice)) == 0
         assert treasury.get_total_escrowed() == 0
-        # Unallocated reserve is untouched by the withdrawal.
+        assert treasury.get_accounting()["grant_escrow"] == 2_000 * ATTO
         assert treasury.get_treasury_balance() == 3_000 * ATTO
 
     def test_tier1_lifecycle_with_verified_audit(
-        self, direct_vm, treasury, direct_owner, direct_alice
+        self, direct_vm, treasury, direct_owner, direct_alice, monkeypatch
     ):
-        """A VETERAN + OSI + on-chain-audited + team repo reaches TIER_1 and settles fully."""
+        """A VETERAN + OSI + on-chain-audited team repository reaches TIER_1."""
         direct_vm.warp("2026-09-02T09:30:00Z")
         record_onchain_audit(treasury, direct_vm, direct_owner)
         deposit(treasury, direct_vm, direct_owner, 60_000 * ATTO)
@@ -245,18 +286,21 @@ class TestFullLifecycle:
         direct_vm.sender = direct_alice
         setup_all(direct_vm, direct_alice, spdx="MIT", commit_count=100, veteran=True,
                   audit_present=True)
-        pid = treasury.submit_proposal(GH_URL, 40_000 * ATTO)
-        treasury.evaluate_proposal(pid)
+        pid = create_grant(treasury, direct_vm, direct_alice, [
+            {"title": "Audited release", "criteria": "Deliver the audited release.",
+             "amount": str(40_000 * ATTO), "deadline": 2051222400}], recipient=direct_alice)
+        treasury.evaluate_grant(pid)
         assert direct_vm.run_validator() is True
         direct_vm.clear_mocks()
 
-        p = treasury.get_proposal(pid)
+        p = treasury.get_grant(pid)
         assert p["tier"] == "TIER_1"
         assert p["has_audit"] == "true"
         assert p["maintainer_verified"] == "true"
 
         direct_vm.sender = direct_owner
-        treasury.execute_proposal(pid)
+        treasury.fund_grant(pid)
+        approve_milestone(treasury, direct_vm, pid, direct_alice, "b" * 40, monkeypatch)
         direct_vm.sender = direct_alice
         assert treasury.withdraw() == 40_000 * ATTO
         assert treasury.get_treasury_balance() == 20_000 * ATTO
@@ -274,14 +318,17 @@ class TestMaintainerBinding:
         deposit(treasury, direct_vm, direct_owner, 5_000 * ATTO)
         direct_vm.sender = direct_alice
         setup_all(direct_vm, direct_alice, spdx="MIT", commit_count=50, maintainer_present=False)
-        pid = treasury.submit_proposal(GH_URL, 3_000 * ATTO)
-        treasury.evaluate_proposal(pid)
+        pid = create_grant(treasury, direct_vm, direct_alice, [
+            {"title": "Release", "criteria": "Ship tested release code.",
+             "amount": str(3_000 * ATTO), "deadline": 2051222400}])
+        treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
 
-        assert treasury.get_proposal(pid)["maintainer_verified"] == "false"
+        assert treasury.get_grant(pid)["maintainer_verified"] == "false"
+        assert treasury.get_grant(pid)["status"] == "REJECTED"
         direct_vm.sender = direct_owner
-        with direct_vm.expect_revert("not a verified repository maintainer"):
-            treasury.execute_proposal(pid)
+        with direct_vm.expect_revert("not approved"):
+            treasury.fund_grant(pid)
 
     def test_manifest_for_a_different_address_is_rejected(
         self, direct_vm, treasury, direct_owner, direct_alice, direct_bob
@@ -291,10 +338,13 @@ class TestMaintainerBinding:
         direct_vm.sender = direct_alice
         setup_all(direct_vm, direct_alice, spdx="MIT", commit_count=50,
                   maintainer_payout=str(direct_bob))
-        pid = treasury.submit_proposal(GH_URL, 3_000 * ATTO)
-        treasury.evaluate_proposal(pid)
+        pid = create_grant(treasury, direct_vm, direct_alice, [
+            {"title": "Release", "criteria": "Ship tested release code.",
+             "amount": str(3_000 * ATTO), "deadline": 2051222400}])
+        treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
-        assert treasury.get_proposal(pid)["maintainer_verified"] == "false"
+        assert treasury.get_grant(pid)["maintainer_verified"] == "false"
+        assert treasury.get_grant(pid)["status"] == "REJECTED"
 
     def test_manifest_owner_mismatch_is_rejected(
         self, direct_vm, treasury, direct_owner, direct_alice
@@ -303,8 +353,7 @@ class TestMaintainerBinding:
         deposit(treasury, direct_vm, direct_owner, 5_000 * ATTO)
         direct_vm.sender = direct_alice
         setup_all(direct_vm, direct_alice, spdx="MIT", commit_count=50)
-        # Overwrite the maintainer manifest with a foreign owner claim (last match wins? no -
-        # re-register a fresh mock list by clearing first to avoid ambiguity).
+        # Re-register a clean mock list with a foreign owner claim.
         direct_vm.clear_mocks()
         mock_repo(direct_vm, spdx="MIT")
         mock_commits(direct_vm, count=50)
@@ -313,10 +362,13 @@ class TestMaintainerBinding:
         mock_maintainer(direct_vm, present=True, payout_address=str(direct_alice),
                         declared_owner="impostor-owner")
         mock_llm(direct_vm)
-        pid = treasury.submit_proposal(GH_URL, 3_000 * ATTO)
-        treasury.evaluate_proposal(pid)
+        pid = create_grant(treasury, direct_vm, direct_alice, [
+            {"title": "Release", "criteria": "Ship tested release code.",
+             "amount": str(3_000 * ATTO), "deadline": 2051222400}])
+        treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
-        assert treasury.get_proposal(pid)["maintainer_verified"] == "false"
+        assert treasury.get_grant(pid)["maintainer_verified"] == "false"
+        assert treasury.get_grant(pid)["status"] == "REJECTED"
 
     def test_api_owner_mismatch_is_rejected(
         self, direct_vm, treasury, direct_owner, direct_alice
@@ -330,10 +382,13 @@ class TestMaintainerBinding:
         mock_audit_manifest(direct_vm, present=False)
         mock_maintainer(direct_vm, present=True, payout_address=str(direct_alice))
         mock_llm(direct_vm)
-        pid = treasury.submit_proposal(GH_URL, 3_000 * ATTO)
-        treasury.evaluate_proposal(pid)
+        pid = create_grant(treasury, direct_vm, direct_alice, [
+            {"title": "Release", "criteria": "Ship tested release code.",
+             "amount": str(3_000 * ATTO), "deadline": 2051222400}])
+        treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
-        assert treasury.get_proposal(pid)["maintainer_verified"] == "false"
+        assert treasury.get_grant(pid)["maintainer_verified"] == "false"
+        assert treasury.get_grant(pid)["status"] == "REJECTED"
 
 
 # ===========================================================================
@@ -344,32 +399,38 @@ class TestSeamlessExecution:
     def test_evaluate_never_leaves_pending(
         self, direct_vm, treasury, direct_owner, direct_alice
     ):
-        """Every evaluated proposal resolves to APPROVED or REJECTED - never PENDING."""
+        """Every evaluated grant resolves to APPROVED or REJECTED from DRAFT."""
         for decision, expect in (("APPROVED", "APPROVED"), ("REJECTED", "REJECTED")):
             direct_vm.sender = direct_alice
             setup_all(direct_vm, direct_alice, spdx="MIT", commit_count=50, decision=decision)
-            pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
-            treasury.evaluate_proposal(pid)
+            pid = create_grant(treasury, direct_vm, direct_alice, [
+                {"title": "Release", "criteria": "Ship tested release code.",
+                 "amount": str(1_000 * ATTO), "deadline": 2051222400}])
+            treasury.evaluate_grant(pid)
             direct_vm.clear_mocks()
-            status = treasury.get_proposal(pid)["status"]
+            status = treasury.get_grant(pid)["status"]
             assert status == expect
             assert status != "PENDING"
 
-    def test_approval_immediately_enables_execution(
+    def test_approval_enables_funding_but_not_unearned_payout(
         self, direct_vm, treasury, direct_owner, direct_alice
     ):
         """As soon as a proposal is APPROVED and the treasury is funded, execution succeeds."""
         deposit(treasury, direct_vm, direct_owner, 2_000 * ATTO)
         direct_vm.sender = direct_alice
         setup_all(direct_vm, direct_alice, spdx="MIT", commit_count=50)
-        pid = treasury.submit_proposal(GH_URL, 2_000 * ATTO)
-        treasury.evaluate_proposal(pid)
+        pid = create_grant(treasury, direct_vm, direct_alice, [
+            {"title": "Release", "criteria": "Ship tested release code.",
+             "amount": str(2_000 * ATTO), "deadline": 2051222400}])
+        treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
 
-        assert treasury.get_proposal(pid)["status"] == "APPROVED"
+        assert treasury.get_grant(pid)["status"] == "APPROVED"
         direct_vm.sender = direct_owner
-        treasury.execute_proposal(pid)  # no extra approval step required
-        assert treasury.get_proposal(pid)["status"] == "FUNDED"
+        treasury.fund_grant(pid)
+        assert treasury.get_grant(pid)["status"] == "FUNDED"
+        assert treasury.get_accounting()["grant_escrow"] == 2_000 * ATTO
+        assert treasury.get_claimable(str(direct_alice)) == 0
 
     def test_rejected_proposal_holds_no_funds(
         self, direct_vm, treasury, direct_owner, direct_alice
@@ -377,16 +438,18 @@ class TestSeamlessExecution:
         deposit(treasury, direct_vm, direct_owner, 2_000 * ATTO)
         direct_vm.sender = direct_alice
         setup_all(direct_vm, direct_alice, spdx="MIT", commit_count=50, decision="REJECTED")
-        pid = treasury.submit_proposal(GH_URL, 2_000 * ATTO)
-        treasury.evaluate_proposal(pid)
+        pid = create_grant(treasury, direct_vm, direct_alice, [
+            {"title": "Release", "criteria": "Ship tested release code.",
+             "amount": str(2_000 * ATTO), "deadline": 2051222400}])
+        treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
 
-        p = treasury.get_proposal(pid)
+        p = treasury.get_grant(pid)
         assert p["status"] == "REJECTED"
         assert p["allocated_amount"] == 0
         direct_vm.sender = direct_owner
-        with direct_vm.expect_revert("expected APPROVED"):
-            treasury.execute_proposal(pid)
+        with direct_vm.expect_revert("not approved"):
+            treasury.fund_grant(pid)
         # Treasury reserve is fully intact.
         assert treasury.get_treasury_balance() == 2_000 * ATTO
         assert treasury.get_total_escrowed() == 0
@@ -398,28 +461,34 @@ class TestSeamlessExecution:
 
 class TestAccountingIntegrity:
     def test_multiple_recipients_settle_independently(
-        self, direct_vm, treasury, direct_owner, direct_alice, direct_bob
+        self, direct_vm, treasury, direct_owner, direct_alice, direct_bob, monkeypatch
     ):
-        """Two funded proposals to two owners keep independent, conserved escrow balances."""
+        """Two funded grants to distinct recipients keep independent escrow balances."""
         deposit(treasury, direct_vm, direct_owner, 10_000 * ATTO)
 
         # Alice's proposal.
         direct_vm.sender = direct_alice
         setup_all(direct_vm, direct_alice, spdx="MIT", commit_count=50)
-        pid_a = treasury.submit_proposal(GH_URL, 3_000 * ATTO)
-        treasury.evaluate_proposal(pid_a)
+        pid_a = create_grant(treasury, direct_vm, direct_alice, [
+            {"title": "Release A", "criteria": "Ship tested release code.",
+             "amount": str(3_000 * ATTO), "deadline": 2051222400}])
+        treasury.evaluate_grant(pid_a)
         direct_vm.clear_mocks()
 
         # Bob's proposal (same repo owner binding for the mocked repo, payout to Bob).
         direct_vm.sender = direct_bob
         setup_all(direct_vm, direct_bob, spdx="MIT", commit_count=50)
-        pid_b = treasury.submit_proposal(GH_URL, 4_000 * ATTO)
-        treasury.evaluate_proposal(pid_b)
+        pid_b = create_grant(treasury, direct_vm, direct_bob, [
+            {"title": "Release B", "criteria": "Ship tested release code.",
+             "amount": str(4_000 * ATTO), "deadline": 2051222400}])
+        treasury.evaluate_grant(pid_b)
         direct_vm.clear_mocks()
 
         direct_vm.sender = direct_owner
-        treasury.execute_proposal(pid_a)
-        treasury.execute_proposal(pid_b)
+        treasury.fund_grant(pid_a)
+        treasury.fund_grant(pid_b)
+        approve_milestone(treasury, direct_vm, pid_a, direct_alice, "a" * 40, monkeypatch)
+        approve_milestone(treasury, direct_vm, pid_b, direct_bob, "b" * 40, monkeypatch)
 
         assert treasury.get_claimable(str(direct_alice)) == 3_000 * ATTO
         assert treasury.get_claimable(str(direct_bob)) == 4_000 * ATTO

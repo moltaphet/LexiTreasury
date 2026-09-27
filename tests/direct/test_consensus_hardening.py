@@ -19,6 +19,7 @@ Self-contained: tests/direct has no shared conftest.
 """
 
 import json
+import datetime
 import pytest
 
 ATTO = 10 ** 18
@@ -86,8 +87,8 @@ def mock_audit_absent(vm):
 
 
 def mock_llm(vm, decision="APPROVED", reasoning="ok", body=None):
-    vm.mock_llm(LLM_ANCHOR, body if body is not None else
-                json.dumps({"decision": decision, "reasoning": reasoning}))
+    vm._review_response = body if body is not None else json.dumps(
+        {"decision": decision, "reasoning": reasoning})
 
 
 def setup(vm, recipient, commit_count=50, veteran=False, authors=DEFAULT_AUTHORS,
@@ -102,9 +103,17 @@ def setup(vm, recipient, commit_count=50, veteran=False, authors=DEFAULT_AUTHORS
 
 
 @pytest.fixture
-def treasury(direct_vm, direct_deploy, direct_owner):
+def treasury(direct_vm, direct_deploy, direct_owner, monkeypatch):
+    direct_vm.warp("2030-01-01T00:00:00Z")
     direct_vm.sender = direct_owner
-    return direct_deploy(CONTRACT, CONSTITUTION, CAP_1, CAP_2, CAP_3)
+    # These consensus and failure-path cases assert strict manifest binding.
+    contract = direct_deploy(CONTRACT, CONSTITUTION, CAP_1, CAP_2, CAP_3, False)
+    import genlayer as gl
+    monkeypatch.setattr(gl.vm, "get_timestamp", lambda: datetime.datetime.fromisoformat(
+        direct_vm._datetime.replace("Z", "+00:00")))
+    monkeypatch.setattr(gl.nondet, "exec_prompt", lambda _prompt, **_kwargs: json.loads(
+        getattr(direct_vm, "_review_response", '{"decision":"APPROVED","reasoning":"ok"}')))
+    return contract
 
 
 def _evaluate_as_leader(direct_vm, treasury, applicant, **leader_state):
@@ -112,9 +121,16 @@ def _evaluate_as_leader(direct_vm, treasury, applicant, **leader_state):
     so a follow-up validator run can be simulated with a swapped environment."""
     setup(direct_vm, applicant, **leader_state)
     direct_vm.sender = applicant
-    pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
-    treasury.evaluate_proposal(pid)
-    return pid
+    grant_id = _submit_grant(treasury, direct_vm, applicant, 1_000 * ATTO)
+    treasury.evaluate_grant(grant_id)
+    return grant_id
+
+
+def _submit_grant(treasury, direct_vm, applicant, amount=1_000 * ATTO):
+    direct_vm.sender = applicant
+    plan = [{"title": "Consensus check", "criteria": "Repository qualifies under policy.",
+             "amount": str(amount), "deadline": 2051222400}]
+    return treasury.create_grant("Consensus check", GH_URL, str(applicant), json.dumps(plan))
 
 
 def _validator_sees(direct_vm, applicant, **validator_state):
@@ -205,32 +221,46 @@ class TestWebEdgeCases:
     ])
     def test_repo_status_classification(self, direct_vm, treasury, direct_alice, status, prefix):
         direct_vm.sender = direct_alice
-        pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
+        pid = _submit_grant(treasury, direct_vm, direct_alice)
         mock_repo(direct_vm, status=status)
         with direct_vm.expect_revert(prefix):
-            treasury.evaluate_proposal(pid)
+            treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
 
     def test_malformed_repo_json_is_transient(self, direct_vm, treasury, direct_alice):
         direct_vm.sender = direct_alice
-        pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
+        pid = _submit_grant(treasury, direct_vm, direct_alice)
         direct_vm.mock_web(rf".*api\.github\.com/repos/{OWNER}/{REPO}$",
                            {"status": 200, "body": "{ broken json"})
         with direct_vm.expect_revert("[TRANSIENT]"):
-            treasury.evaluate_proposal(pid)
+            treasury.evaluate_grant(pid)
+        direct_vm.clear_mocks()
+
+    @pytest.mark.parametrize("status, prefix", [(404, "[EXTERNAL]"), (500, "[TRANSIENT]")])
+    def test_commit_history_error_classification(self, direct_vm, treasury, direct_alice, status, prefix):
+        mock_repo(direct_vm)
+        mock_commits(direct_vm, count=50, status=status)
+        mock_contents(direct_vm)
+        mock_audit_absent(direct_vm)
+        mock_maintainer(direct_vm, payout_address=str(direct_alice))
+        mock_llm(direct_vm)
+        direct_vm.sender = direct_alice
+        grant_id = _submit_grant(treasury, direct_vm, direct_alice)
+        with direct_vm.expect_revert(prefix):
+            treasury.evaluate_grant(grant_id)
         direct_vm.clear_mocks()
 
     def test_llm_unexpected_keys_raise_llm_error(self, direct_vm, treasury, direct_alice):
         direct_vm.sender = direct_alice
-        pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
+        pid = _submit_grant(treasury, direct_vm, direct_alice)
         mock_repo(direct_vm)
         mock_commits(direct_vm, count=50)
         mock_contents(direct_vm)
         mock_audit_absent(direct_vm)
         mock_maintainer(direct_vm, present=False)
-        direct_vm.mock_llm(LLM_ANCHOR, json.dumps({"unexpected": "shape"}))
+        mock_llm(direct_vm, body=json.dumps({"unexpected": "shape"}))
         with direct_vm.expect_revert("[LLM_ERROR]"):
-            treasury.evaluate_proposal(pid)
+            treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
 
     @pytest.mark.parametrize("kind", ["server_error", "rate_limited", "malformed", "missing_field"])
@@ -238,7 +268,7 @@ class TestWebEdgeCases:
         """A broken maintainer manifest must NOT abort evaluation - it just leaves the
         recipient unverified (fail-closed), so governance still resolves cleanly."""
         direct_vm.sender = direct_alice
-        pid = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
+        pid = _submit_grant(treasury, direct_vm, direct_alice)
         mock_repo(direct_vm)
         mock_commits(direct_vm, count=50)
         mock_contents(direct_vm)
@@ -254,10 +284,10 @@ class TestWebEdgeCases:
             direct_vm.mock_web(url, {"status": 200, "body": json.dumps({"owner": OWNER})})
         mock_llm(direct_vm, decision="APPROVED")
 
-        treasury.evaluate_proposal(pid)   # must not raise
+        treasury.evaluate_grant(pid)   # must not raise
         direct_vm.clear_mocks()
-        p = treasury.get_proposal(pid)
-        assert p["status"] == "APPROVED"
+        p = treasury.get_grant(pid)
+        assert p["status"] == "REJECTED"
         assert p["maintainer_verified"] == "false"
 
 
@@ -275,24 +305,24 @@ class TestBlockTimeProgression:
         direct_vm.warp("2026-01-01T00:00:00Z")
         direct_vm.sender = direct_alice
         setup(direct_vm, direct_alice, commit_count=50)
-        pid1 = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
-        treasury.evaluate_proposal(pid1)
+        pid1 = _submit_grant(treasury, direct_vm, direct_alice)
+        treasury.evaluate_grant(pid1)
         direct_vm.clear_mocks()
-        early = treasury.get_proposal(pid1)
+        early = treasury.get_grant(pid1)
 
         direct_vm.warp("2031-12-31T23:59:59Z")   # years later
         direct_vm.sender = direct_alice
         setup(direct_vm, direct_alice, commit_count=50)
-        pid2 = treasury.submit_proposal(GH_URL, 1_000 * ATTO)
-        treasury.evaluate_proposal(pid2)
+        pid2 = _submit_grant(treasury, direct_vm, direct_alice)
+        treasury.evaluate_grant(pid2)
         direct_vm.clear_mocks()
-        late = treasury.get_proposal(pid2)
+        late = treasury.get_grant(pid2)
 
         for f in fields:
             assert early[f] == late[f], f"time affected consensus field {f!r}"
 
-    def test_value_flows_work_after_time_warp(self, direct_vm, treasury, direct_owner, direct_alice):
-        """Deposit -> evaluate -> execute -> withdraw all succeed after warping far ahead."""
+    def test_value_flows_work_after_time_warp(self, direct_vm, treasury, direct_owner, direct_alice, monkeypatch):
+        """Deposit -> evaluate -> fund -> adjudicate -> release -> withdraw after a time warp."""
         direct_vm.warp("2030-06-15T12:00:00Z")
 
         direct_vm.sender = direct_owner
@@ -302,13 +332,28 @@ class TestBlockTimeProgression:
 
         direct_vm.sender = direct_alice
         setup(direct_vm, direct_alice, commit_count=50)
-        pid = treasury.submit_proposal(GH_URL, 3_000 * ATTO)
-        treasury.evaluate_proposal(pid)
+        pid = _submit_grant(treasury, direct_vm, direct_alice, 3_000 * ATTO)
+        treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
-        assert treasury.get_proposal(pid)["status"] == "APPROVED"
-
+        assert treasury.get_grant(pid)["status"] == "APPROVED"
         direct_vm.sender = direct_owner
-        treasury.execute_proposal(pid)
+        treasury.fund_grant(pid)
+        sha = "a" * 40
+        direct_vm.sender = direct_alice
+        treasury.submit_evidence(pid, f"{GH_URL}/commit/{sha}")
+        direct_vm.mock_web(rf".*api\.github\.com/repos/{OWNER}/{REPO}/commits/{sha}$", {
+            "status": 200, "body": json.dumps({"sha": sha,
+                "commit": {"message": "Repository milestone delivery", "author": {"date": "2030-06-16T00:00:00Z"}},
+                "files": [{"filename": "tests/test_delivery.py", "status": "added", "additions": 5,
+                           "deletions": 0, "patch": "+assert delivery"}]}),
+        })
+        import genlayer as gl
+        monkeypatch.setattr(gl.nondet, "exec_prompt", lambda _prompt, **_kwargs: {
+            "decision": "APPROVE", "reason_code": "CRITERIA_MET", "summary": "Tests prove completion.",
+        })
+        direct_vm.sender = direct_owner
+        treasury.adjudicate(pid)
+        treasury.release_tranche(pid)
         direct_vm.sender = direct_alice
         assert treasury.withdraw() == 3_000 * ATTO
         assert treasury.get_total_escrowed() == 0

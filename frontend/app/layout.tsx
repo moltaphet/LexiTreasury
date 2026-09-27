@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "LexiTreasury — GenLayer DAO",
+  title: "LexiTreasury — Milestone grants for open source",
   description:
-    "Autonomous treasury protocol governed by natural-language DAO constitutions on GenLayer",
+    "Fund open-source work in fixed milestones, verify commit-pinned evidence and release each tranche through GenLayer consensus.",
 };
 
 export default function RootLayout({
@@ -13,10 +13,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
-      <body className="min-h-screen bg-slate-950 text-slate-100 antialiased">
-        {children}
-      </body>
+    <html lang="en">
+      <body>{children}</body>
     </html>
   );
 }

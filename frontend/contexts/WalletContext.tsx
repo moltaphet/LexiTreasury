@@ -8,14 +8,14 @@ import {
   useEffect,
   type ReactNode,
 } from "react";
+import studioDevDeployment from "@/config/studio-dev-deployment.json";
 
-// StudioNet chain parameters for wallet_addEthereumChain
-const STUDIONET = {
-  chainId: "0xf22f",          // 61999 decimal
-  chainName: "GenLayer StudioNet",
-  nativeCurrency: { name: "GEN Token", symbol: "GEN", decimals: 18 },
-  rpcUrls: ["https://studio.genlayer.com/api"],
-  blockExplorerUrls: ["https://genlayer-explorer.vercel.app"],
+const STUDIO_DEV = {
+  chainId: `0x${studioDevDeployment.chain_id.toString(16)}`,
+  chainName: studioDevDeployment.chain_name,
+  nativeCurrency: studioDevDeployment.native_currency,
+  rpcUrls: [studioDevDeployment.rpc_url],
+  blockExplorerUrls: [studioDevDeployment.explorer_base_url],
 } as const;
 
 // Minimal EIP-1193 provider interface
@@ -47,21 +47,21 @@ const WalletContext = createContext<WalletState>({
   disconnect: () => {},
 });
 
-// Switch to or add StudioNet in the injected wallet.
-async function ensureStudioNet(provider: EthereumProvider): Promise<void> {
+// Switch to or add Studio Dev in the injected wallet.
+async function ensureStudioDev(provider: EthereumProvider): Promise<void> {
   const current = await provider.request({ method: "eth_chainId" }) as string;
-  if (current === STUDIONET.chainId) return;
+  if (current === STUDIO_DEV.chainId) return;
   try {
     await provider.request({
       method: "wallet_switchEthereumChain",
-      params: [{ chainId: STUDIONET.chainId }],
+      params: [{ chainId: STUDIO_DEV.chainId }],
     });
   } catch (err: unknown) {
     // 4902 = chain not added to the wallet yet
     if ((err as { code?: number }).code === 4902) {
       await provider.request({
         method: "wallet_addEthereumChain",
-        params: [STUDIONET],
+        params: [STUDIO_DEV],
       });
     } else {
       throw err;
@@ -78,8 +78,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const provider = typeof window !== "undefined" ? window.ethereum : undefined;
     if (!provider) {
-      setIsHydrated(true);
-      return;
+      const timer = window.setTimeout(() => setIsHydrated(true), 0);
+      return () => window.clearTimeout(timer);
     }
 
     (provider.request({ method: "eth_accounts" }) as Promise<string[]>)
@@ -124,8 +124,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       throw new Error("No accounts returned from wallet.");
     }
 
-    // Ensure MetaMask is on StudioNet before we store the address.
-    await ensureStudioNet(provider);
+    // Ensure the wallet matches the SDK chain before storing the address.
+    await ensureStudioDev(provider);
 
     setAddress(accounts[0]);
   }, []);
