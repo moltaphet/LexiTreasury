@@ -848,8 +848,7 @@ def _fetch_maintainer_claim(owner: str, repo: str) -> dict:
 
 
 def _verify_maintainer(claim: dict, url_owner: str, api_owner_login: str,
-                       recipient_address: str, applicant_address: str = "",
-                       allow_demo_bypass: bool = False) -> bool:
+                       recipient_address: str) -> bool:
     """Check whether a repository write-access assertion matches the grant recipient.
 
     All inputs are derived from the GitHub evidence payload (the repo API owner login
@@ -875,15 +874,7 @@ def _verify_maintainer(claim: dict, url_owner: str, api_owner_login: str,
     # Missing manifests leave payout authorization unverified; repository ownership
     # is not inferred from the URL owner or applicant wallet.
     if not claim.get("payout_address", ""):
-        # Optional testnet/demo mode permits the submitting wallet to receive its
-        # own grant when the repository's GitHub API owner matches the requested
-        # URL owner. This is deliberately opt-in: it does not prove that the
-            # submitter controls the GitHub account. This switch is disabled by default.
-        return bool(
-            allow_demo_bypass
-            and _normalize_address(recipient_address)
-            and _normalize_address(recipient_address) == _normalize_address(applicant_address)
-        )
+        return False
     if claim.get("declared_owner", "") != api_login:
         return False
 
@@ -891,8 +882,7 @@ def _verify_maintainer(claim: dict, url_owner: str, api_owner_login: str,
 
 
 def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: dict,
-                        recipient_address: str, applicant_address: str = "",
-                        allow_demo_bypass: bool = False) -> dict:
+                        recipient_address: str) -> dict:
     """Fetch and normalise GitHub repository metrics. Must run inside a nondet context.
 
     Produces only invariant, discrete signals plus the deterministically verified audit
@@ -962,7 +952,6 @@ def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: d
     maintainer_claim = _fetch_maintainer_claim(owner, repo)
     maintainer_verified: bool = _verify_maintainer(
         maintainer_claim, owner, owner_login, recipient_address,
-        applicant_address, allow_demo_bypass,
     )
 
     return {
@@ -1213,7 +1202,6 @@ class LexiTreasury(gl.contract.Contract):
     # ---- Storage fields - class-level type annotations only ----
     owner:             Address
     constitution:      str
-    allow_demo_owner_payout: bool
     treasury_balance:  u256       # Unallocated treasury reserve in attos
     total_escrowed:    u256       # Sum of all claimable balances not yet withdrawn
     grants:            gl.storage.TreeMap[str, Grant]
@@ -1248,7 +1236,6 @@ class LexiTreasury(gl.contract.Contract):
         tier_cap_1: int,
         tier_cap_2: int,
         tier_cap_3: int,
-        allow_demo_owner_payout: bool = False,
     ) -> None:
         """Deploy the LexiTreasury with an initial constitution and per-tier funding caps."""
         constitution_text = _normalized_constitution(constitution)
@@ -1261,7 +1248,6 @@ class LexiTreasury(gl.contract.Contract):
 
         self.owner             = Address(str(gl.message.sender_address))
         self.constitution      = constitution_text
-        self.allow_demo_owner_payout = bool(allow_demo_owner_payout)
         self.treasury_balance  = u256(0)
         self.total_escrowed    = u256(0)
         self.next_grant_id     = u256(0)
@@ -2042,8 +2028,6 @@ class LexiTreasury(gl.contract.Contract):
         cap_1: u256        = self.tier_cap_1
         cap_2: u256        = self.tier_cap_2
         cap_3: u256        = self.tier_cap_3
-        demo_owner_payout: bool = self.allow_demo_owner_payout
-        applicant: str = grant.applicant
 
         # Materialise the on-chain attestation registry into plain dicts so audit
         # verification inside the nondet block is pure and reproducible per validator.
@@ -2066,7 +2050,6 @@ class LexiTreasury(gl.contract.Contract):
         def leader_fn() -> dict:
             metrics = _fetch_repo_metrics(
                 github_url, trusted_snapshot, attest_snapshot, recipient,
-                applicant, demo_owner_payout,
             )
             decision, reasoning = _run_llm_evaluation(
                 constitution, metrics["owner"], metrics["repo"], metrics

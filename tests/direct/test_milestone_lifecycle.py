@@ -197,7 +197,6 @@ def test_constructor_policy_and_cap_boundaries(direct_vm, direct_deploy):
     direct_vm.sender = OWNER
     clean = direct_deploy(CONTRACT, "  Policy  ", 100, 50, 10)
     assert clean.get_constitution() == "Policy"
-    assert clean.allow_demo_owner_payout is False
     import genlayer.contract as gc
     assert clean.get_treasury_balance() == 0 and clean.get_grant_count() == 0
     assert clean.get_tier_caps() == {"TIER_1": 100, "TIER_2": 50, "TIER_3": 10}
@@ -1550,8 +1549,12 @@ def test_reject_forked_repository(contract, direct_vm):
     assert contract.get_grant(grant_id)["status"] == "DRAFT"
 
 
-def test_demo_owner_payout_is_off_by_default(contract):
-    assert contract.allow_demo_owner_payout is False
+def test_demo_payout_bypass_does_not_exist(contract, direct_vm):
+    # A recipient equal to the applicant with no payout manifest is never verified.
+    module = sys.modules["_contract_lexitreasury"]
+    assert not hasattr(contract, "allow_demo_owner_payout")
+    assert module._verify_maintainer({"declared_owner": "", "payout_address": "", "error": "x"},
+                                     "acme", "acme", RECIPIENT) is False
 
 
 def test_timely_submission_survives_late_adjudication(contract, direct_vm):

@@ -125,15 +125,15 @@ CANCELLED                         FUNDED / IN_PROGRESS
 | Field | Value |
 | --- | --- |
 | Network | GenLayer Studio Next, chain ID 61997 |
-| Contract | [`0x75b1E8D1E67e0B0bbDa3a0651210497CF71a4Fb6`](https://explorer-studio-next.genlayer.com/address/0x75b1E8D1E67e0B0bbDa3a0651210497CF71a4Fb6) |
-| Deploy tx | [`0xc401c4e533351f219c5a93752b61a99dced339c1d79997b0774e3a144f40acb3`](https://explorer-studio-next.genlayer.com/tx/0xc401c4e533351f219c5a93752b61a99dced339c1d79997b0774e3a144f40acb3) (consensus ACCEPTED) |
+| Contract | [`0x4Ca6201156c8eA860599802b10827ca4E3704762`](https://explorer-studio-next.genlayer.com/address/0x4Ca6201156c8eA860599802b10827ca4E3704762) |
+| Deploy tx | [`0x23707ca0ee76353f4acffb69bc4858b47b396dcdbf1252531b248442c077e439`](https://explorer-studio-next.genlayer.com/tx/0x23707ca0ee76353f4acffb69bc4858b47b396dcdbf1252531b248442c077e439) (consensus ACCEPTED) |
 | Deployer / owner | `0x6ec5cb7469a661b8e23b4867359893a25116ea19` (`lexitreasury_v5_deployer`) |
-| Source SHA-256 | `f455136f1914fc9c631881eee02124af5e288cb8a2413868fb4fa3b550abfc53` |
-| Deployed | 2026-10-02T08:58:29Z |
+| Source SHA-256 | `22d1c282fd20a353e2209c2b5135c464a5daaa59fc5acd477af88e01d9477150` |
+| Deployed | 2026-10-02T09:28:49Z |
 
 Recorded in [`deployments/studio-next.json`](deployments/studio-next.json). The
-deployed contract's `get_accounting()` returns `is_solvent`, and `allow_demo_owner_payout`
-was deployed `false`. The explorer URL formats are unverified.
+deployed contract's `get_accounting()` returns `is_solvent`. The explorer URL formats are unverified. The earlier deployment
+`0x75b1E8D1E67e0B0bbDa3a0651210497CF71a4Fb6` is superseded: it still had the removed demo payout flag.
 
 ## Audit Hardening & V2 Changelog
 
@@ -192,21 +192,9 @@ chain ID, and Studio Next Explorer base. Contract reads, writes, wallet network
 settings, and the app's contract Explorer link consume this record; the app builds
 the address-specific link from the configured Explorer base and contract address.
 
-The contract constructor accepts a final `allow_demo_owner_payout` boolean that
-defaults to `false`. The active Studio Dev configuration also sets it to `false`;
-eligibility therefore requires a repository-controlled payout assertion manifest.
-That assertion can be changed by anyone with repository write access and does not
-prove personal approval by the GitHub owner. Setting the flag to `true` is an
-explicit demo-only opt-in and does not prove the applicant controls the GitHub
-account. The deployed contract exposes no
-getter or setter for this value, and the checked-in deployment record has no
-transaction hash with which to verify its constructor argument. The local
-configuration is not evidence of the deployed value. A new deployment with the
-flag set to `false` is required to guarantee fail-closed ownership on chain. The
-currently configured address is the earlier deployment; this checkout's source
-changes do not alter its bytecode. The deployed contract has no authorized upgrade
-path, so redeployment is also required to activate the timely-evidence, transient
-GitHub failure, repository completeness, and auditor-address fixes.
+The contract has no demo payout path. Eligibility always requires a
+repository-controlled payout assertion manifest, which anyone with repository write
+access can change and which does not prove personal approval by the GitHub owner.
 
 | Setting | Value |
 |---|---|
@@ -286,8 +274,7 @@ audit. Skipped legacy assertions are not counted as passing coverage.
 - Audit attestations count only when the repo manifest, report hash, repository
   binding, and currently active auditor address all match. The payout manifest is
   an assertion by someone with repository write access; it does not prove that the
-  GitHub owner personally approved the address. The demo bypass is disabled by
-  default and in active configuration, and is not ownership proof.
+  GitHub owner personally approved the address.
 - Evidence is bound to the verified maintainer and to the funding time. Adjudication
   rejects a commit unless (a) the GitHub-API-resolved `author.login` equals the
   grant's verified maintainer login (the git config name and email are
@@ -299,8 +286,8 @@ audit. Skipped legacy assertions are not counted as passing coverage.
   repositories, whose owner login is an organisation, cannot currently satisfy the
   author binding.
 - Forked repositories are rejected at evaluation (`ERR_FORKED_REPO_UNSUPPORTED`)
-  because they inherit upstream history and metrics. `allow_demo_owner_payout`
-  defaults to `false` and is deployed `false`.
+  because they inherit upstream history and metrics. The demo payout bypass
+  (`allow_demo_owner_payout`) was removed entirely.
 - A submission made before the milestone deadline remains adjudicable after it. If
   nobody adjudicates within 7 days of the deadline, the milestone may be expired and
   refunded so escrow cannot be locked indefinitely.
@@ -334,6 +321,18 @@ audit. Skipped legacy assertions are not counted as passing coverage.
   Transaction UI distinguishes submitted, pending finalization, failure, and
   finalized success; the hash is available for retry tracking if finalization
   waiting times out.
+
+## Known Limitations & Security Assumptions
+
+- **Organization-Owned Repositories:** In the current version, milestone commit
+  verification checks `commit.author.login == maintainer_login`. Repositories owned by
+  GitHub Organizations (where owner is an org entity, not an individual author)
+  require individual maintainer binding and will be expanded in V3.
+- **Commit dates are committer-controlled.** The `funded_at` check stops replaying
+  existing history but not a maintainer who forges a date.
+- **The payout manifest is a write-access assertion,** not proof that the GitHub
+  owner approved the address.
+- **Auditor trust is owner-curated;** it is not decentralized auditor selection.
 
 ## References
 

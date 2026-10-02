@@ -119,7 +119,7 @@ class Session:
     def deploy(self) -> None:
         cfg = json.loads(CONFIG_PATH.read_text())["constructor_args"]
         args = [cfg["constitution"], int(cfg["tier_cap_1"]), int(cfg["tier_cap_2"]),
-                int(cfg["tier_cap_3"]), False]  # allow_demo_owner_payout is always False in production
+                int(cfg["tier_cap_3"])]
         tx_hash = self.client.deploy_contract(code=CONTRACT_PATH.read_bytes(), account=self.owner, args=args)
         receipt = self.client.wait_for_transaction_receipt(
             transaction_hash=tx_hash, status="ACCEPTED", retries=60, interval=5000)
@@ -129,7 +129,7 @@ class Session:
         if not address:
             sys.exit(f"Deployed ({tx_hash}) but could not read the address from the receipt: {receipt}")
         self.record["contract_address"] = address
-        self._log("deploy", str(tx_hash), receipt, "constructor allow_demo_owner_payout=False")
+        self._log("deploy", str(tx_hash), receipt, "constructor")
 
 
 def phase_setup(args) -> None:
