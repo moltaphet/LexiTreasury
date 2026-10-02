@@ -120,12 +120,49 @@ CANCELLED                         FUNDED / IN_PROGRESS
   because funded-but-unreleased tranches are still owed; a check against reserve and
   claimable escrow alone would report a contract holding too little as solvent.
 
+## Live Deployment (Studio Next)
+
+| Field | Value |
+| --- | --- |
+| Network | GenLayer Studio Next, chain ID 61997 |
+| Contract | [`0x75b1E8D1E67e0B0bbDa3a0651210497CF71a4Fb6`](https://explorer-studio-next.genlayer.com/address/0x75b1E8D1E67e0B0bbDa3a0651210497CF71a4Fb6) |
+| Deploy tx | [`0xc401c4e533351f219c5a93752b61a99dced339c1d79997b0774e3a144f40acb3`](https://explorer-studio-next.genlayer.com/tx/0xc401c4e533351f219c5a93752b61a99dced339c1d79997b0774e3a144f40acb3) (consensus ACCEPTED) |
+| Deployer / owner | `0x6ec5cb7469a661b8e23b4867359893a25116ea19` (`lexitreasury_v5_deployer`) |
+| Source SHA-256 | `f455136f1914fc9c631881eee02124af5e288cb8a2413868fb4fa3b550abfc53` |
+| Deployed | 2026-10-02T08:58:29Z |
+
+Recorded in [`deployments/studio-next.json`](deployments/studio-next.json). The
+deployed contract's `get_accounting()` returns `is_solvent`, and `allow_demo_owner_payout`
+was deployed `false`. The explorer URL formats are unverified.
+
+## Audit Hardening & V2 Changelog
+
+- **Evidence freshness and author binding.** `fund_grant` stamps `funded_at` on each
+  milestone. A commit is rejected when its author or committer date predates
+  `funded_at` or cannot be parsed. The GitHub API `author.login` must equal the
+  grant's verified maintainer login; the spoofable git config name and email are
+  ignored. Dates are still chosen by the committer, so this blocks replaying old
+  commits, not date forgery by the maintainer account.
+- **Fork defense.** Forked repositories are rejected deterministically at evaluation
+  with `ERR_FORKED_REPO_UNSUPPORTED`.
+- **Deadline grace window.** The submission deadline is separate from adjudication.
+  A submission made before the deadline stays adjudicable afterwards (`submitted_at`
+  is recorded). After a 7-day grace window an unreviewed submission may be expired
+  and refunded, so honest applicants are not timed out by slow adjudication and
+  escrow cannot be locked forever.
+- **Leader error handling.** `UserError` text is extracted via `data`, then
+  `message`, then `args[0]`, then `str()` on both leader and validators, so identical
+  errors reach the same consensus verdict.
+- **Solvency invariant.** `get_accounting()` exposes `contract_balance`,
+  `total_liabilities` and `is_solvent`. Liabilities include grant escrow, which a
+  reserve-plus-claimable check would miss.
+
 ## Live On-Chain Verification Table
 
 Transactions are produced by `scripts/interact_live.py` against Studio Next (chain
 ID 61997, `https://studio-next.genlayer.com/api`) and recorded, with the contract
 address and the SHA-256 of `contracts/lexitreasury.py`, in
-`deployments/studio-next.json`. **No live run has been recorded yet**, so this table
+`deployments/studio-next.json`. The contract is deployed, but **no grant lifecycle has been run on it yet**, so this table
 is intentionally empty rather than filled with placeholders. Run `setup`, push one
 new commit to the grant repository, then run `finish` (see the script docstring) and
 paste the resulting rows here.

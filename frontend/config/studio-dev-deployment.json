@@ -2,7 +2,11 @@
   "network": "GenLayer Studio Dev / Studio Next preview",
   "chain_id": 61997,
   "chain_name": "GenLayer Studio Dev / Studio Next preview",
-  "native_currency": { "name": "GEN Token", "symbol": "GEN", "decimals": 18 },
+  "native_currency": {
+    "name": "GEN Token",
+    "symbol": "GEN",
+    "decimals": 18
+  },
   "rpc_url": "https://studio-dev.genlayer.com/api",
   "explorer_base_url": "https://explorer-studio-next.genlayer.com/",
   "contract_version": "unified-milestone-v1",
@@ -14,11 +18,11 @@
     "tier_cap_3": "100000000000000000000",
     "allow_demo_owner_payout": false
   },
-  "contract_address": "0x9644619Cdc77A1caA43B1ec5b94412b8dF9993b0",
-  "deployment_transaction": null,
-  "deployer": null,
-  "deployed_at": null,
+  "contract_address": "0x75b1E8D1E67e0B0bbDa3a0651210497CF71a4Fb6",
+  "deployment_transaction": "0xc401c4e533351f219c5a93752b61a99dced339c1d79997b0774e3a144f40acb3",
+  "deployer": "0x6ec5cb7469a661b8e23b4867359893a25116ea19",
+  "deployed_at": "2026-10-02T08:58:29Z",
   "runner": "5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng",
   "sdk": "genlayer-js@2.0.0-rc.1",
-  "status": "existing deployment; current source fixes pending redeployment; constructor arguments are not readable"
+  "status": "deployed on Studio Next from current source (source sha256 f455136f1914...)"
 }

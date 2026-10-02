@@ -1,0 +1,32 @@
+{
+  "network": {
+    "name": "GenLayer Studio Next",
+    "chain_id": 61997,
+    "rpc_url": "https://studio-next.genlayer.com/api",
+    "explorer": "https://explorer-studio-next.genlayer.com"
+  },
+  "contract_address": "0x75b1E8D1E67e0B0bbDa3a0651210497CF71a4Fb6",
+  "deployment_transaction": "0xc401c4e533351f219c5a93752b61a99dced339c1d79997b0774e3a144f40acb3",
+  "deployer": "0x6ec5cb7469a661b8e23b4867359893a25116ea19",
+  "deployer_account": "lexitreasury_v5_deployer",
+  "consensus_status": "ACCEPTED",
+  "deployed_at": "2026-10-02T08:58:29Z",
+  "source_path": "contracts/lexitreasury.py",
+  "source_sha256": "f455136f1914fc9c631881eee02124af5e288cb8a2413868fb4fa3b550abfc53",
+  "constructor_args": {
+    "constitution": "Funding requires a public repository with an OSI-approved open-source license. Bot-only or artificially padded commit activity does not qualify. Grants must precommit ordered milestones with measurable acceptance criteria, amounts, and deadlines; release each tranche only after commit-pinned evidence is adjudicated.",
+    "tier_cap_1": "1000000000000000000000",
+    "tier_cap_2": "500000000000000000000",
+    "tier_cap_3": "100000000000000000000",
+    "allow_demo_owner_payout": false
+  },
+  "transactions": [
+    {
+      "step": "deploy",
+      "tx_hash": "0xc401c4e533351f219c5a93752b61a99dced339c1d79997b0774e3a144f40acb3",
+      "status": "ACCEPTED",
+      "note": "constructor allow_demo_owner_payout=False",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0xc401c4e533351f219c5a93752b61a99dced339c1d79997b0774e3a144f40acb3"
+    }
+  ]
+}
