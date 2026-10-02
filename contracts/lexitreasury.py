@@ -3,6 +3,7 @@
 from genlayer import *
 import genlayer as gl
 from dataclasses import dataclass
+import datetime
 import json
 import re
 import hashlib
@@ -91,9 +92,12 @@ _ATTESTATION_UID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,63}")
 _REPORT_PATH = re.compile(r"[A-Za-z0-9._/-]+")
 
 def _now() -> int:
-    # The installed py-genlayer API returns an aware datetime pinned to this
-    # transaction's timestamp in deterministic execution.
-    return int(gl.vm.get_timestamp().timestamp())
+    # The transaction datetime from the message envelope is deterministic across
+    # leader and validators. gl.vm.get_timestamp() is not available on every
+    # deployed GenVM runner (Studio Next rejects it), so it is not used.
+    stamp = str(gl.message.raw["datetime"]).strip().replace("Z", "+00:00")
+    return int(datetime.datetime.fromisoformat(stamp).timestamp())
+
 
 def _commit_parts(url: str):
     match = _COMMIT_URL.fullmatch(url.strip())

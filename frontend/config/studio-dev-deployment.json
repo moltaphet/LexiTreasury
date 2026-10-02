@@ -12,16 +12,16 @@
   "contract_version": "unified-milestone-v1",
   "contract_path": "contracts/lexitreasury.py",
   "constructor_args": {
-    "constitution": "Funding requires a public repository with an OSI-approved open-source license. Bot-only or artificially padded commit activity does not qualify. Grants must precommit ordered milestones with measurable acceptance criteria, amounts, and deadlines; release each tranche only after commit-pinned evidence is adjudicated.",
+    "constitution": "Funding requires a public repository with an OSI-approved open-source license. Bot-only or artificially padded commit activity does not qualify. Approve a repository that satisfies these conditions according to the verified repository data provided. Milestone terms, amounts, deadlines and commit-pinned evidence adjudication are enforced by the contract itself and are not evaluated at this stage.",
     "tier_cap_1": "1000000000000000000000",
     "tier_cap_2": "500000000000000000000",
     "tier_cap_3": "100000000000000000000"
   },
-  "contract_address": "0x4Ca6201156c8eA860599802b10827ca4E3704762",
-  "deployment_transaction": "0x23707ca0ee76353f4acffb69bc4858b47b396dcdbf1252531b248442c077e439",
+  "contract_address": "0x755D77CF9878872246220cc1Cd745c47ebd5cB44",
+  "deployment_transaction": "0xdce62e487ca4aa226164cca6cdb12798d12c8d329e0ec65712ffe1e30f1d4516",
   "deployer": "0x6ec5cb7469a661b8e23b4867359893a25116ea19",
-  "deployed_at": "2026-10-02T09:28:49Z",
+  "deployed_at": "2026-10-02T09:41:57Z",
   "runner": "5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng",
   "sdk": "genlayer-js@2.0.0-rc.1",
-  "status": "deployed on Studio Next from current source (source sha256 22d1c282fd20...)"
+  "status": "deployed on Studio Next from current source (source sha256 d6c54aa68dc9...)"
 }

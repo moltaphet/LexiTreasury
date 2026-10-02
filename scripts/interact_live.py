@@ -45,6 +45,17 @@ RPC_URL = "https://studio-next.genlayer.com/api"
 EXPLORER = "https://explorer-studio-next.genlayer.com"
 ATTO = 10 ** 18
 DAY = 86400
+# Studio Next requires an explicit fee distribution; values mirror `genlayer estimate-fees`.
+FEES = {
+    "distribution": {
+        "leaderTimeunitsAllocation": 100, "validatorTimeunitsAllocation": 200,
+        "appealRounds": 0, "executionBudgetPerRound": 25000000000000000,
+        "executionConsumed": 0, "totalMessageFees": 0, "rotations": [3],
+        "maxPriceGenPerTimeUnit": 2, "storageFeeMaxGasPrice": 300000000,
+        "receiptFeeMaxGasPrice": 300000000,
+    },
+    "feeValue": 200000000000000000,
+}
 
 
 def load_sdk():
@@ -79,6 +90,13 @@ def save_record(record: dict) -> None:
     RECORD_PATH.write_text(json.dumps(record, indent=2) + "\n")
 
 
+def describe_receipt(receipt) -> str:
+    """Consensus outcome plus VM execution outcome, e.g. MAJORITY_AGREE/FINISHED_WITH_RETURN."""
+    if not isinstance(receipt, dict):
+        return str(receipt)
+    return f"{receipt.get('result_name')}/{receipt.get('txExecutionResultName')}"
+
+
 class Session:
     def __init__(self, owner_key: str, recipient_key: str):
         create_account, create_client, chain = load_sdk()
@@ -94,8 +112,7 @@ class Session:
         return self.record["contract_address"]
 
     def _log(self, step: str, tx_hash: str, receipt, note: str = "") -> None:
-        status = str(receipt.get("statusName") or receipt.get("status_name") or receipt.get("status")) \
-            if isinstance(receipt, dict) else str(receipt)
+        status = describe_receipt(receipt)
         self.record["transactions"].append({
             "step": step, "tx_hash": tx_hash, "status": status, "note": note,
             "explorer_url": f"{EXPLORER}/tx/{tx_hash}", "recorded_at": int(time.time()),
@@ -107,22 +124,24 @@ class Session:
     def write(self, step, account, method, args=None, value=0, note=""):
         tx_hash = self.client.write_contract(
             address=self.address, function_name=method, account=account,
-            args=args or [], value=value)
+            args=args or [], value=value, fees=FEES)
         receipt = self.client.wait_for_transaction_receipt(
-            transaction_hash=tx_hash, status="ACCEPTED", retries=60, interval=5000)
+            transaction_hash=tx_hash, wait_until="decided", retries=120, interval=5000)
         self._log(step, str(tx_hash), receipt, note)
+        if isinstance(receipt, dict) and receipt.get("txExecutionResultName") != "FINISHED_WITH_RETURN":
+            sys.exit(f"{step} executed with an error on-chain: {describe_receipt(receipt)}")
         return receipt
 
     def read(self, method, args=None):
-        return self.client.read_contract(address=self.address, function_name=method, args=args or [])
+        return self.client.read_contract(address=self.address, function_name=method, args=args or [], account=self.owner)
 
     def deploy(self) -> None:
         cfg = json.loads(CONFIG_PATH.read_text())["constructor_args"]
         args = [cfg["constitution"], int(cfg["tier_cap_1"]), int(cfg["tier_cap_2"]),
                 int(cfg["tier_cap_3"])]
-        tx_hash = self.client.deploy_contract(code=CONTRACT_PATH.read_bytes(), account=self.owner, args=args)
+        tx_hash = self.client.deploy_contract(code=CONTRACT_PATH.read_bytes(), account=self.owner, args=args, fees=FEES)
         receipt = self.client.wait_for_transaction_receipt(
-            transaction_hash=tx_hash, status="ACCEPTED", retries=60, interval=5000)
+            transaction_hash=tx_hash, wait_until="decided", retries=120, interval=5000)
         address = (receipt.get("txDataDecoded") or {}).get("contract_address") \
             or (receipt.get("data") or {}).get("contract_address") \
             or receipt.get("to_address") or receipt.get("recipient")
@@ -143,10 +162,14 @@ def phase_setup(args) -> None:
         {"title": "Delivery", "criteria": args.criteria, "amount": str(2 * ATTO), "deadline": now + 30 * DAY},
         {"title": "Follow-up", "criteria": args.criteria, "amount": str(1 * ATTO), "deadline": now + 60 * DAY},
     ]
-    s.write("1 deposit_treasury", s.owner, "deposit", value=10 * ATTO)
-    s.write("2 create_grant", s.recipient, "create_grant",
-            ["LexiTreasury live proof", args.repo, s.recipient.address, json.dumps(plan)])
-    grant_id = f"grant_{int(s.read('get_grant_count'))}"
+    if not args.skip_deposit:
+        s.write("1 deposit_treasury", s.owner, "deposit", value=4 * ATTO)
+    if args.grant_id:
+        grant_id = args.grant_id  # resume: create_grant already sent and recorded
+    else:
+        s.write("2 create_grant", s.recipient, "create_grant",
+                ["LexiTreasury live proof", args.repo, s.recipient.address, json.dumps(plan)])
+        grant_id = f"grant_{int(s.read('get_grant_count'))}"
     s.record["grant_id"] = grant_id
     s.record["repository"] = args.repo
     s.write("3 evaluate_grant", s.recipient, "evaluate_grant", [grant_id], note="consensus decision")
@@ -199,6 +222,9 @@ def main() -> None:
     setup.add_argument("--repo", required=True)
     setup.add_argument("--contract", help="reuse an already-deployed contract address")
     setup.add_argument("--criteria", default="Add a tested change to the repository that is committed after funding.")
+    setup.add_argument("--skip-deposit", action="store_true",
+                       help="treasury already funded and the deposit tx is already recorded")
+    setup.add_argument("--grant-id", help="resume with an already-created grant")
     setup.set_defaults(fn=phase_setup)
     finish = sub.add_parser("finish")
     finish.add_argument("--evidence-url", required=True)

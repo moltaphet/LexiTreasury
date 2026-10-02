@@ -125,15 +125,17 @@ CANCELLED                         FUNDED / IN_PROGRESS
 | Field | Value |
 | --- | --- |
 | Network | GenLayer Studio Next, chain ID 61997 |
-| Contract | [`0x4Ca6201156c8eA860599802b10827ca4E3704762`](https://explorer-studio-next.genlayer.com/address/0x4Ca6201156c8eA860599802b10827ca4E3704762) |
-| Deploy tx | [`0x23707ca0ee76353f4acffb69bc4858b47b396dcdbf1252531b248442c077e439`](https://explorer-studio-next.genlayer.com/tx/0x23707ca0ee76353f4acffb69bc4858b47b396dcdbf1252531b248442c077e439) (consensus ACCEPTED) |
+| Contract | [`0x755D77CF9878872246220cc1Cd745c47ebd5cB44`](https://explorer-studio-next.genlayer.com/address/0x755D77CF9878872246220cc1Cd745c47ebd5cB44) |
+| Deploy tx | [`0xdce62e487ca4aa226164cca6cdb12798d12c8d329e0ec65712ffe1e30f1d4516`](https://explorer-studio-next.genlayer.com/tx/0xdce62e487ca4aa226164cca6cdb12798d12c8d329e0ec65712ffe1e30f1d4516) (consensus ACCEPTED) |
 | Deployer / owner | `0x6ec5cb7469a661b8e23b4867359893a25116ea19` (`lexitreasury_v5_deployer`) |
-| Source SHA-256 | `22d1c282fd20a353e2209c2b5135c464a5daaa59fc5acd477af88e01d9477150` |
-| Deployed | 2026-10-02T09:28:49Z |
+| Source SHA-256 | `d6c54aa68dc93207294b0df7177b5f492bcd2bdaf195804343bb9462b820f17a` |
+| Deployed | 2026-10-02T09:41:57Z |
 
 Recorded in [`deployments/studio-next.json`](deployments/studio-next.json). The
-deployed contract's `get_accounting()` returns `is_solvent`. The explorer URL formats are unverified. The earlier deployment
-`0x75b1E8D1E67e0B0bbDa3a0651210497CF71a4Fb6` is superseded: it still had the removed demo payout flag.
+deployed contract's `get_accounting()` returns `is_solvent`. The explorer URL formats are unverified. Earlier deployments are superseded (see
+`superseded_deployments` in the record): `0x75b1…` still had the removed demo flag, and
+`0x4Ca6…` used `gl.vm.get_timestamp()`, which the Studio Next runner rejects, so
+`create_grant` failed on-chain; the contract now reads `gl.message.raw["datetime"]`.
 
 ## Audit Hardening & V2 Changelog
 

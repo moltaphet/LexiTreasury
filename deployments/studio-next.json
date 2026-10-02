@@ -5,14 +5,14 @@
     "rpc_url": "https://studio-next.genlayer.com/api",
     "explorer": "https://explorer-studio-next.genlayer.com"
   },
-  "contract_address": "0x4Ca6201156c8eA860599802b10827ca4E3704762",
-  "deployment_transaction": "0x23707ca0ee76353f4acffb69bc4858b47b396dcdbf1252531b248442c077e439",
+  "contract_address": "0x755D77CF9878872246220cc1Cd745c47ebd5cB44",
+  "deployment_transaction": "0xdce62e487ca4aa226164cca6cdb12798d12c8d329e0ec65712ffe1e30f1d4516",
   "deployer": "0x6ec5cb7469a661b8e23b4867359893a25116ea19",
   "deployer_account": "lexitreasury_v5_deployer",
   "consensus_status": "ACCEPTED",
-  "deployed_at": "2026-10-02T09:28:49Z",
+  "deployed_at": "2026-10-02T09:41:57Z",
   "source_path": "contracts/lexitreasury.py",
-  "source_sha256": "22d1c282fd20a353e2209c2b5135c464a5daaa59fc5acd477af88e01d9477150",
+  "source_sha256": "d6c54aa68dc93207294b0df7177b5f492bcd2bdaf195804343bb9462b820f17a",
   "constructor_args": {
     "constitution": "Funding requires a public repository with an OSI-approved open-source license. Bot-only or artificially padded commit activity does not qualify. Grants must precommit ordered milestones with measurable acceptance criteria, amounts, and deadlines; release each tranche only after commit-pinned evidence is adjudicated.",
     "tier_cap_1": "1000000000000000000000",
@@ -22,10 +22,65 @@
   "transactions": [
     {
       "step": "deploy",
-      "tx_hash": "0x23707ca0ee76353f4acffb69bc4858b47b396dcdbf1252531b248442c077e439",
-      "status": "ACCEPTED",
+      "tx_hash": "0xdce62e487ca4aa226164cca6cdb12798d12c8d329e0ec65712ffe1e30f1d4516",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
       "note": "constructor",
-      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x23707ca0ee76353f4acffb69bc4858b47b396dcdbf1252531b248442c077e439"
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0xdce62e487ca4aa226164cca6cdb12798d12c8d329e0ec65712ffe1e30f1d4516"
+    },
+    {
+      "step": "1 deposit_treasury",
+      "tx_hash": "0x5c4c5cffbf8f5e6f0da65890428985bd932ce73f23ed6ad70ac263dc1a7387e6",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x5c4c5cffbf8f5e6f0da65890428985bd932ce73f23ed6ad70ac263dc1a7387e6",
+      "recorded_at": 1790934137
+    },
+    {
+      "step": "2a create_grant (grant_1)",
+      "tx_hash": "0xa755b2651cf857011e2475724cd0291a9a156983a72ea6f2ab9aba7a738a35bb",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0xa755b2651cf857011e2475724cd0291a9a156983a72ea6f2ab9aba7a738a35bb",
+      "recorded_at": 1790934155
+    },
+    {
+      "step": "3a evaluate_grant (grant_1 -> REJECTED under original constitution)",
+      "tx_hash": "0x8b342396f627c90b50455dce9955d0b254e40e30b9a2c060e85c14d37d0e4df0",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "consensus decision",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x8b342396f627c90b50455dce9955d0b254e40e30b9a2c060e85c14d37d0e4df0",
+      "recorded_at": 1790934181
+    },
+    {
+      "step": "2b update_constitution (owner)",
+      "tx_hash": "0x2fe483badf7eb91cb1a472fb8fdfcb7e3df704df79edf25957d83e7012c35a6e",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "constitution reworded: milestone terms are contract-enforced, not LLM-evaluated (grant_1 had been REJECTED because the evaluator cannot see milestones)",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x2fe483badf7eb91cb1a472fb8fdfcb7e3df704df79edf25957d83e7012c35a6e"
+    },
+    {
+      "step": "2 create_grant",
+      "tx_hash": "0x049b7e91b46db83f290603f79d666ca300b3bd86cc661010c02ef6b52e522a60",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x049b7e91b46db83f290603f79d666ca300b3bd86cc661010c02ef6b52e522a60",
+      "recorded_at": 1790934322
+    },
+    {
+      "step": "3 evaluate_grant",
+      "tx_hash": "0x7684611f42b33f8ab7a2ecb6dbd0593aff82d5293c054f8ede272acbf150dc16",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "consensus decision",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x7684611f42b33f8ab7a2ecb6dbd0593aff82d5293c054f8ede272acbf150dc16",
+      "recorded_at": 1790934347
+    },
+    {
+      "step": "4 fund_grant",
+      "tx_hash": "0x1f98ac94d437b87d6d5c0f5bf344df4e8d2ee0b65a5245b6e729e795ff4c13a0",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x1f98ac94d437b87d6d5c0f5bf344df4e8d2ee0b65a5245b6e729e795ff4c13a0",
+      "recorded_at": 1790934364
     }
   ],
   "superseded_deployments": [
@@ -34,6 +89,14 @@
       "deployment_transaction": "0xc401c4e533351f219c5a93752b61a99dced339c1d79997b0774e3a144f40acb3",
       "source_sha256": "f455136f1914fc9c631881eee02124af5e288cb8a2413868fb4fa3b550abfc53",
       "reason": "redeployed after removing the demo payout bypass (constructor changed)"
+    },
+    {
+      "contract_address": "0x4Ca6201156c8eA860599802b10827ca4E3704762",
+      "deployment_transaction": "0x23707ca0ee76353f4acffb69bc4858b47b396dcdbf1252531b248442c077e439",
+      "source_sha256": "22d1c282fd20a353e2209c2b5135c464a5daaa59fc5acd477af88e01d9477150",
+      "reason": "live create_grant (tx 0xfd2fecebf94fc68d15da089c35ca8f5bc7b28cd68d7614d4e95d37070b1cd12c) executed with an error on-chain: gl.vm.get_timestamp() is rejected by the Studio Next runner (SystemError: 2: inval). Contract now reads gl.message.raw['datetime']."
     }
-  ]
+  ],
+  "grant_id": "grant_2",
+  "repository": "https://github.com/moltaphet/LexiTreasury"
 }

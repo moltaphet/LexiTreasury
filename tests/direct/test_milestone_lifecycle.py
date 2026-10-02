@@ -31,10 +31,8 @@ def contract(direct_vm, direct_deploy, monkeypatch):
     direct_vm.value = 100 * ATTO
     deployed.deposit()
     import genlayer as gl
-    monkeypatch.setattr(
-        gl.vm, "get_timestamp",
-        lambda: datetime.datetime.fromisoformat(direct_vm._datetime.replace("Z", "+00:00")),
-    )
+    from _clock import follow_vm_clock
+    follow_vm_clock(monkeypatch, direct_vm)
     monkeypatch.setattr(
         gl.nondet, "exec_prompt",
         lambda prompt, **kwargs: json.loads(direct_vm._review_response),
@@ -1623,3 +1621,14 @@ def test_leader_and_validator_agree_on_identical_user_error(contract):
     assert module._handle_leader_error(Leader(), failing) is True
     Leader.data = "[EXPECTED] Different failure"
     assert module._handle_leader_error(Leader(), failing) is False
+
+
+def test_contract_clock_does_not_depend_on_get_timestamp(contract, direct_vm, monkeypatch):
+    # Studio Next rejects the GetTimestamp host call (SystemError: 2: inval) that
+    # gl.vm.get_timestamp() issues, so the contract must read the message envelope.
+    import genlayer as gl
+
+    def unsupported():
+        raise SystemError("2: inval")
+    monkeypatch.setattr(gl.vm, "get_timestamp", unsupported)
+    assert create_grant(contract, direct_vm) == "grant_1"

@@ -109,8 +109,8 @@ def treasury(direct_vm, direct_deploy, direct_owner, monkeypatch):
     # These consensus and failure-path cases assert strict manifest binding.
     contract = direct_deploy(CONTRACT, CONSTITUTION, CAP_1, CAP_2, CAP_3)
     import genlayer as gl
-    monkeypatch.setattr(gl.vm, "get_timestamp", lambda: datetime.datetime.fromisoformat(
-        direct_vm._datetime.replace("Z", "+00:00")))
+    from _clock import follow_vm_clock
+    follow_vm_clock(monkeypatch, direct_vm)
     monkeypatch.setattr(gl.nondet, "exec_prompt", lambda _prompt, **_kwargs: json.loads(
         getattr(direct_vm, "_review_response", '{"decision":"APPROVED","reasoning":"ok"}')))
     return contract
