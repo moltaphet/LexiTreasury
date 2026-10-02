@@ -15,6 +15,7 @@ describe("Studio Dev contract reads", () => {
     expect(EXPLORER_URL).toBe(`${deployment.explorer_base_url}address/${deployment.contract_address}`);
     expect(studioDevnet.id).toBe(deployment.chain_id);
     expect(studioDevnet.rpcUrls.default.http[0]).toBe(deployment.rpc_url);
+    expect(deployment.constructor_args.allow_demo_owner_payout).toBe(false);
   });
 
   test("requests a bounded grant page with the caller's offset", async () => {

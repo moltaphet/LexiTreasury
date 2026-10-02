@@ -227,13 +227,14 @@ class TestWebEdgeCases:
             treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
 
-    def test_malformed_repo_json_is_transient(self, direct_vm, treasury, direct_alice):
+    def test_malformed_repo_json_is_definitive_and_leaves_draft(self, direct_vm, treasury, direct_alice):
         direct_vm.sender = direct_alice
         pid = _submit_grant(treasury, direct_vm, direct_alice)
         direct_vm.mock_web(rf".*api\.github\.com/repos/{OWNER}/{REPO}$",
                            {"status": 200, "body": "{ broken json"})
-        with direct_vm.expect_revert("[TRANSIENT]"):
+        with direct_vm.expect_revert("[EXTERNAL]"):
             treasury.evaluate_grant(pid)
+        assert treasury.get_grant(pid)["status"] == "DRAFT"
         direct_vm.clear_mocks()
 
     @pytest.mark.parametrize("status, prefix", [(404, "[EXTERNAL]"), (500, "[TRANSIENT]")])
@@ -264,9 +265,10 @@ class TestWebEdgeCases:
         direct_vm.clear_mocks()
 
     @pytest.mark.parametrize("kind", ["server_error", "rate_limited", "malformed", "missing_field"])
-    def test_maintainer_fetch_is_fail_closed_not_fatal(self, direct_vm, treasury, direct_alice, kind):
-        """A broken maintainer manifest must NOT abort evaluation - it just leaves the
-        recipient unverified (fail-closed), so governance still resolves cleanly."""
+    def test_maintainer_fetch_distinguishes_transient_errors_from_unverified_claims(
+        self, direct_vm, treasury, direct_alice, kind,
+    ):
+        """Transient failures leave the draft retryable; malformed/missing claims fail closed."""
         direct_vm.sender = direct_alice
         pid = _submit_grant(treasury, direct_vm, direct_alice)
         mock_repo(direct_vm)
@@ -284,7 +286,13 @@ class TestWebEdgeCases:
             direct_vm.mock_web(url, {"status": 200, "body": json.dumps({"owner": OWNER})})
         mock_llm(direct_vm, decision="APPROVED")
 
-        treasury.evaluate_grant(pid)   # must not raise
+        if kind in ("server_error", "rate_limited"):
+            with direct_vm.expect_revert("[TRANSIENT]"):
+                treasury.evaluate_grant(pid)
+            assert treasury.get_grant(pid)["status"] == "DRAFT"
+            return
+
+        treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
         p = treasury.get_grant(pid)
         assert p["status"] == "REJECTED"
@@ -343,6 +351,7 @@ class TestBlockTimeProgression:
         treasury.submit_evidence(pid, f"{GH_URL}/commit/{sha}")
         direct_vm.mock_web(rf".*api\.github\.com/repos/{OWNER}/{REPO}/commits/{sha}$", {
             "status": 200, "body": json.dumps({"sha": sha,
+                "author": {"login": OWNER},
                 "commit": {"message": "Repository milestone delivery", "author": {"date": "2030-06-16T00:00:00Z"}},
                 "files": [{"filename": "tests/test_delivery.py", "status": "added", "additions": 5,
                            "deletions": 0, "patch": "+assert delivery"}]}),

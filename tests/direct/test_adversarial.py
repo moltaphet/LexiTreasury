@@ -33,7 +33,7 @@ GH_URL = "https://github.com/test-owner/test-repo"
 OWNER, REPO = "test-owner", "test-repo"
 LLM_ANCHOR = r".*governance engine for LexiTreasury.*"
 
-AUDITOR_ID = "trailofbits"
+AUDITOR_ID = "0x3333333333333333333333333333333333333333"
 AUDIT_UID = "att_0001"
 REPORT_PATH = "audit/report.pdf"
 REPORT_TEXT = "LexiTreasury verified audit report artefact v1"
@@ -134,6 +134,7 @@ def onchain_audit(treasury, vm, owner, uid=AUDIT_UID, github_url=GH_URL,
     vm.sender = owner
     if not treasury.is_trusted_auditor(auditor):
         treasury.register_trusted_auditor(auditor)
+    vm.sender = auditor
     treasury.record_audit_attestation(uid, github_url, auditor, report_hash)
     vm.sender = prev
 
@@ -291,9 +292,11 @@ class TestForgedAudits:
 
     def test_untrusted_auditor_cannot_be_recorded(self, direct_vm, treasury, direct_owner):
         """The registry itself refuses attestations from auditors that were never trusted."""
-        direct_vm.sender = direct_owner
+        direct_vm.sender = "0x4444444444444444444444444444444444444444"
         with direct_vm.expect_revert("not a trusted active auditor"):
-            treasury.record_audit_attestation("att_x", GH_URL, "fly-by-night-auditor", REPORT_HASH)
+            treasury.record_audit_attestation(
+                "att_x", GH_URL, "0x4444444444444444444444444444444444444444", REPORT_HASH,
+            )
 
     def test_manifest_path_traversal_rejected(self, direct_vm, treasury, direct_owner, direct_alice):
         """A manifest whose report_path attempts directory traversal is fail-closed."""
@@ -373,18 +376,19 @@ class TestFakeCommitActivity:
 # ===========================================================================
 
 class TestFailClosedConsensus:
-    def test_malformed_repo_json_raises_transient(self, direct_vm, treasury, direct_alice):
+    def test_malformed_repo_json_is_definitive_and_preserves_draft(self, direct_vm, treasury, direct_alice):
         direct_vm.sender = direct_alice
         pid = treasury.create_grant("Fail closed", GH_URL, str(direct_alice), json.dumps([
             {"title": "Milestone", "criteria": "Ship the release", "amount": str(ATTO), "deadline": 2051222400}
         ]))
         direct_vm.mock_web(rf".*api\.github\.com/repos/{OWNER}/{REPO}$",
                            {"status": 200, "body": "{ this is not json"})
-        with direct_vm.expect_revert("[TRANSIENT]"):
+        with direct_vm.expect_revert("[EXTERNAL]"):
             treasury.evaluate_grant(pid)
+        assert treasury.get_grant(pid)["status"] == "DRAFT"
         direct_vm.clear_mocks()
 
-    def test_commits_non_list_payload_raises(self, direct_vm, treasury, direct_alice):
+    def test_commits_non_list_payload_is_definitive_and_preserves_draft(self, direct_vm, treasury, direct_alice):
         direct_vm.sender = direct_alice
         pid = treasury.create_grant("Fail closed", GH_URL, str(direct_alice), json.dumps([
             {"title": "Milestone", "criteria": "Ship the release", "amount": str(ATTO), "deadline": 2051222400}
@@ -392,8 +396,9 @@ class TestFailClosedConsensus:
         mock_repo(direct_vm)
         direct_vm.mock_web(rf".*api\.github\.com/repos/{OWNER}/{REPO}/commits\?per_page=100",
                            {"status": 200, "body": json.dumps({"unexpected": "object"})})
-        with direct_vm.expect_revert("[TRANSIENT]"):
+        with direct_vm.expect_revert("[EXTERNAL]"):
             treasury.evaluate_grant(pid)
+        assert treasury.get_grant(pid)["status"] == "DRAFT"
         direct_vm.clear_mocks()
 
     def test_llm_non_json_shape_raises_llm_error(self, direct_vm, treasury, direct_alice):
@@ -412,12 +417,11 @@ class TestFailClosedConsensus:
             treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
 
-    def test_corrupt_quality_source_defaults_to_none(self, direct_vm, treasury, direct_alice):
-        """A 500 on the contents endpoint yields QUALITY_NONE (fail-closed), blocking funding
-        even for an otherwise VETERAN + OSI repo the model approved."""
+    def test_corrupt_quality_source_keeps_evaluation_retryable(self, direct_vm, treasury, direct_alice):
+        """A 500 contents response is unknown, not proof that quality signals are absent."""
         mock_repo(direct_vm, spdx="MIT")
         mock_commits(direct_vm, count=100, veteran=True)
-        mock_contents(direct_vm, status=500)          # quality source unavailable
+        mock_contents(direct_vm, status=500)
         mock_audit_manifest(direct_vm, present=False)
         mock_maintainer(direct_vm, present=False)
         mock_llm(direct_vm, decision="APPROVED")
@@ -426,9 +430,10 @@ class TestFailClosedConsensus:
         pid = treasury.create_grant("Fail closed", GH_URL, str(direct_alice), json.dumps([
             {"title": "Milestone", "criteria": "Ship the release", "amount": str(ATTO), "deadline": 2051222400}
         ]))
-        treasury.evaluate_grant(pid)
+        with direct_vm.expect_revert("[TRANSIENT]"):
+            treasury.evaluate_grant(pid)
         direct_vm.clear_mocks()
 
         q = treasury.get_grant(pid)
-        assert q["quality_bracket"] == "QUALITY_NONE"
-        assert q["status"] == "REJECTED"
+        assert q["quality_bracket"] == ""
+        assert q["status"] == "DRAFT"

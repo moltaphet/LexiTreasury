@@ -47,20 +47,48 @@ MILESTONE_EXPIRED = "EXPIRED"
 MAX_MILESTONES = 10
 MAX_ATTEMPTS = 3
 MAX_GRANTS_PAGE = 25
+MAX_AUDITORS = 64
+MAX_AUDIT_ATTESTATIONS = 256
+MAX_CONSTITUTION_BYTES = 8192
 MAX_TITLE = 120
 MAX_CRITERIA = 2000
 MAX_EVIDENCE_URL = 240
+MAX_REPOSITORY_RESPONSE_BYTES = 64 * 1024
+MAX_COMMIT_LIST_RESPONSE_BYTES = 512 * 1024
+MAX_COMMIT_PAGE_ITEMS = 100
+MAX_CONTENTS_RESPONSE_BYTES = 512 * 1024
 MAX_COMMIT_FILES = 12
 MAX_PATCH_CHARS = 1800
+MAX_COMMIT_MESSAGE_CHARS = 1200
+MAX_COMMIT_PATH_CHARS = 240
+MAX_COMMIT_STATUS_CHARS = 30
+MAX_COMMIT_AUTHOR_DATE_CHARS = 80
+MAX_COMMIT_EVIDENCE_BYTES = 32000
+MAX_COMMIT_RESPONSE_BYTES = 65536
+MAX_GITHUB_DIRECTORY_ITEMS = 1000
+MAX_GIT_TREE_ENTRIES = 100000
+MAX_GIT_TREE_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_AUDIT_MANIFEST_BYTES = 16 * 1024
+MAX_MAINTAINER_MANIFEST_BYTES = 16 * 1024
+MAX_AUDIT_REPORT_PATH_CHARS = 256
+MAX_AUDIT_REPORT_BYTES = 256 * 1024
 REASON_MET = "CRITERIA_MET"
 REASON_UNMET = "CRITERIA_UNMET"
+REASON_INCOMPLETE = "EVIDENCE_INCOMPLETE"
+# A submission made before its deadline stays adjudicable for this long afterwards;
+# once the window lapses an unreviewed milestone may be expired so escrow cannot
+# be locked by a stalled adjudication.
+ADJUDICATION_GRACE_WINDOW = 7 * 24 * 60 * 60
+ERR_FORKED_REPO_UNSUPPORTED = "ERR_FORKED_REPO_UNSUPPORTED"
 
 _COMMIT_URL = re.compile(
     r"https://github\.com/([A-Za-z0-9_.-]{1,39})/([A-Za-z0-9_.-]{1,100})/commit/([0-9a-fA-F]{40})/?"
 )
 _REPOSITORY_URL = re.compile(
-    r"https://github\.com/[A-Za-z0-9_.-]{1,39}/[A-Za-z0-9_.-]{1,100}/?"
+    r"https://github\.com/([A-Za-z0-9_.-]{1,39})/([A-Za-z0-9_.-]{1,100})/?"
 )
+_ATTESTATION_UID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,63}")
+_REPORT_PATH = re.compile(r"[A-Za-z0-9._/-]+")
 
 def _now() -> int:
     # The installed py-genlayer API returns an aware datetime pinned to this
@@ -73,6 +101,45 @@ def _commit_parts(url: str):
 
 def _external_text(value, limit: int) -> str:
     return _sanitize_external_text(value, limit)
+
+
+def _normalized_constitution(value) -> str:
+    if not isinstance(value, str):
+        raise gl.vm.UserError(f"{_ERR_EXPECTED} Constitution must be a string")
+    if len(value.encode("utf-8")) > MAX_CONSTITUTION_BYTES:
+        raise gl.vm.UserError(
+            f"{_ERR_EXPECTED} Constitution exceeds the {MAX_CONSTITUTION_BYTES}-byte limit"
+        )
+    text = value.strip()
+    if not text:
+        raise gl.vm.UserError(f"{_ERR_EXPECTED} Constitution cannot be empty")
+    return text
+
+
+def _valid_attestation_uid(value) -> str:
+    if not isinstance(value, str) or not _ATTESTATION_UID.fullmatch(value):
+        return ""
+    return value
+
+
+def _canonical_github_repo(value) -> tuple:
+    """Parse only the canonical HTTPS GitHub repository URL used by grant creation."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    match = _REPOSITORY_URL.fullmatch(value)
+    if not match:
+        return None
+    owner, repo = match.group(1), match.group(2)
+    if repo.lower().endswith(".git"):
+        return None
+    return owner.lower(), repo.lower()
+
+
+def _response_exceeds_limit(response, max_bytes: int) -> bool:
+    """Check Content-Length first, then the received body before decoding/parsing."""
+    if _content_length(response) > max_bytes:
+        return True
+    return len(response.body) > max_bytes
 
 # Commit count brackets - invariant buckets that absorb count drift between validator calls
 BRACKET_NONE:    str = "NONE"     # 0 commits
@@ -147,11 +214,9 @@ _CI_DIR_NAMES: frozenset = frozenset({".github", ".circleci"})
 # malicious applicant cannot redirect verification to an attacker-controlled file.
 _ATTESTATION_PATH: str = ".well-known/genlayer-audit.json"
 
-# Maintainer manifest is fetched from a fixed, well-known repository path. Only a
-# principal with write access to the repository can publish or change it, so the
-# payout address it declares is authorised by the repository owner/maintainer. The
-# declared owner is cross-checked against the owner login the GitHub API reports for
-# the repository, binding the payout to the real repository owner from the evidence.
+# Maintainer manifest is fetched from a fixed, well-known repository path. It is an
+# assertion by a principal with repository write access; it does not prove that the
+# GitHub repository owner personally approved the payout address.
 _MAINTAINER_PATH: str = ".well-known/genlayer-treasury.json"
 
 # ---------------------------------------------------------------------------
@@ -229,6 +294,57 @@ def _normalize_address(value) -> str:
     return ""
 
 
+def _raise_for_github_transient(status: int, endpoint: str) -> None:
+    """Keep rate limits and server failures out of deterministic missing-data paths."""
+    if status in (0, 403, 408, 425, 429) or status >= 500:
+        raise gl.vm.UserError(
+            f"{_ERR_TRANSIENT} GitHub {endpoint} unavailable ({status})"
+        )
+
+
+def _github_get(url: str, headers: dict):
+    """Convert transport exceptions into retryable consensus failures."""
+    try:
+        return gl.nondet.web.get(url, headers=headers)
+    except Exception:
+        raise gl.vm.UserError(f"{_ERR_TRANSIENT} GitHub request failed")
+
+
+def _content_length(response) -> int:
+    """Return a usable Content-Length response header, or -1 when unavailable."""
+    headers = getattr(response, "headers", None)
+    if not isinstance(headers, dict):
+        return -1
+    for key, value in headers.items():
+        if str(key).strip().lower() == "content-length":
+            try:
+                size = int(str(value).strip())
+                return size if size >= 0 else -1
+            except (TypeError, ValueError):
+                return -1
+    return -1
+
+
+def _audit_claim(uid: str = "", report_hash: str = "", integrity: str = "false",
+                 reason: str = "") -> dict:
+    return {
+        "audit_uid": uid,
+        "audit_report_hash": report_hash,
+        "audit_integrity": integrity,
+        "audit_reason": reason,
+    }
+
+
+def _valid_report_path(value) -> bool:
+    """Accept only an unambiguous repository-relative POSIX path."""
+    if (not isinstance(value, str) or len(value) > MAX_AUDIT_REPORT_PATH_CHARS
+            or not _REPORT_PATH.fullmatch(value)):
+        return False
+    if value.startswith("/") or value.endswith("/") or "//" in value:
+        return False
+    return all(segment not in ("", ".", "..") for segment in value.split("/"))
+
+
 # ---------------------------------------------------------------------------
 # Storage dataclasses
 # ---------------------------------------------------------------------------
@@ -244,7 +360,7 @@ class Grant:
     requested_amount:     u256   # In attos
     status:               str    # STATUS_* constant
     tier:                 str    # TIER_1 / TIER_2 / TIER_3 / ""
-    allocated_amount:     u256   # Effective funding cap applied at evaluation time
+    allocated_amount:     u256   # Approved total recorded under the cap at evaluation time
     maintainer_verified:  str    # "true" / "false" - recipient bound to repo owner
     maintainer_login:     str    # Verified GitHub owner login, "" if unverified
     commit_bracket:       str    # BRACKET_* constant (set after evaluation)
@@ -272,7 +388,9 @@ class Milestone:
     title: str
     criteria: str
     amount: u256
-    deadline: u256
+    deadline: u256          # submission_deadline: evidence must be submitted before this
+    funded_at: u256         # block timestamp of fund_grant; evidence must not predate it
+    submitted_at: u256      # block timestamp of the current evidence submission
     status: str
     attempts: u256
     evidence_url: str
@@ -288,16 +406,17 @@ class Milestone:
 class AuditAttestation:
     """On-chain audit attestation record.
 
-    Recorded by the treasury owner on behalf of a trusted auditor. The audit is only
-    honoured for a grant when the repository's published manifest references this
-    UID, the report bytes hash to report_hash, the repo binding matches, the auditor
-    is still trusted, and this record is still active. A forged PDF in a repo therefore
-    proves nothing - only an on-chain, hash-bound, auditor-signed record counts.
+    Submitted by a registered auditor wallet, whose address is authenticated by the
+    transaction sender. The audit is only honoured for a grant when the repository's
+    published manifest references this UID, the report bytes hash to report_hash, the
+    repo binding matches, the auditor is still trusted, and this record is active.
+    A forged PDF in a repo therefore proves nothing - only a hash-bound record
+    submitted by the registered address counts.
     """
     attestation_uid: str
     owner:           str   # GitHub owner the attestation is bound to (lowercase)
     repo:            str   # GitHub repo the attestation is bound to (lowercase)
-    auditor_id:      str   # Registered trusted auditor identifier (lowercase)
+    auditor_id:      str   # Registered auditor wallet address (lowercase)
     report_hash:     str   # sha256 hex of the canonical audit report artefact
     status:          str   # ATTEST_ACTIVE / ATTEST_REVOKED
     recorded_at:     str
@@ -412,27 +531,30 @@ def _fetch_commit_signals(owner: str, repo: str) -> dict:
       2. A probe at page 500 (per_page=1) to distinguish MATURE from VETERAN.
     """
     url_p1 = f"https://api.github.com/repos/{owner}/{repo}/commits?per_page=100"
-    resp1 = gl.nondet.web.get(url_p1, headers=_GH_HEADERS)
+    resp1 = _github_get(url_p1, _GH_HEADERS)
 
+    _raise_for_github_transient(resp1.status, "commits API")
     if resp1.status == 409:
         return {"commit_bracket": BRACKET_NONE, "contributor_bracket": CONTRIB_NONE}
-    if resp1.status in (403, 429):
-        raise gl.vm.UserError(f"{_ERR_TRANSIENT} GitHub rate limited")
-    if resp1.status >= 500:
-        raise gl.vm.UserError(f"{_ERR_TRANSIENT} GitHub API unavailable ({resp1.status})")
     if resp1.status == 404:
         raise gl.vm.UserError(f"{_ERR_EXTERNAL} Repository not found")
     if resp1.status != 200:
         raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub commits API returned {resp1.status}")
+    if _response_exceeds_limit(resp1, MAX_COMMIT_LIST_RESPONSE_BYTES):
+        raise gl.vm.UserError(
+            f"{_ERR_EXTERNAL} GitHub commit list exceeds the {MAX_COMMIT_LIST_RESPONSE_BYTES}-byte limit"
+        )
 
     try:
         page1 = json.loads(resp1.body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        raise gl.vm.UserError(f"{_ERR_TRANSIENT} Malformed JSON from GitHub commits API")
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub commits API returned malformed JSON")
 
-    if not isinstance(page1, list):
+    if not isinstance(page1, list) or len(page1) > MAX_COMMIT_PAGE_ITEMS:
         # Fail-closed: an unexpected shape must not be read as a healthy repo.
-        raise gl.vm.UserError(f"{_ERR_TRANSIENT} Unexpected commits payload shape")
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub commits API returned an invalid payload")
+    if any(not isinstance(item, dict) for item in page1):
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub commits API returned malformed commit entries")
 
     contributor_bracket = _contributor_bracket(page1)
     count1 = len(page1)
@@ -445,46 +567,57 @@ def _fetch_commit_signals(owner: str, repo: str) -> dict:
 
     # Page 1 is full (>=100 commits). Probe page 500 to distinguish MATURE vs VETERAN.
     url_probe = f"https://api.github.com/repos/{owner}/{repo}/commits?per_page=1&page=500"
-    resp_probe = gl.nondet.web.get(url_probe, headers=_GH_HEADERS)
-
-    commit_bracket = BRACKET_MATURE
-    if resp_probe.status == 200:
-        try:
-            probe = json.loads(resp_probe.body.decode("utf-8"))
-            if isinstance(probe, list) and len(probe) > 0:
-                commit_bracket = BRACKET_VETERAN
-        except (ValueError, UnicodeDecodeError):
-            pass  # Probe inconclusive - keep MATURE
+    resp_probe = _github_get(url_probe, _GH_HEADERS)
+    _raise_for_github_transient(resp_probe.status, "page-500 commits probe")
+    if resp_probe.status == 404:
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub page-500 commits probe was not found")
+    if resp_probe.status != 200:
+        raise gl.vm.UserError(
+            f"{_ERR_EXTERNAL} GitHub page-500 commits probe returned {resp_probe.status}"
+        )
+    if _response_exceeds_limit(resp_probe, MAX_COMMIT_LIST_RESPONSE_BYTES):
+        raise gl.vm.UserError(
+            f"{_ERR_EXTERNAL} GitHub page-500 commit probe exceeds the {MAX_COMMIT_LIST_RESPONSE_BYTES}-byte limit"
+        )
+    try:
+        probe = json.loads(resp_probe.body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub page-500 commits probe returned malformed JSON")
+    if (not isinstance(probe, list) or
+            (probe and (not isinstance(probe[0], dict) or
+                        not isinstance(probe[0].get("sha"), str) or not probe[0]["sha"]))):
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub page-500 commits probe returned an invalid payload")
+    commit_bracket = BRACKET_VETERAN if probe else BRACKET_MATURE
 
     return {"commit_bracket": commit_bracket, "contributor_bracket": contributor_bracket}
 
 
-def _analyze_quality(owner: str, repo: str) -> dict:
-    """Scan the repository root for structural engineering-quality indicators.
-
-    Returns booleans for test suite, CI configuration and build manifest presence.
-    Fail-closed: any non-200 / malformed response yields all-false (unproven quality).
-    """
+def _quality_signals_from_root_entries(entries: list, tree_api: bool = False) -> dict:
     result = {"has_tests": False, "has_ci": False, "has_build_manifest": False}
-
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents"
-    resp = gl.nondet.web.get(url, headers=_GH_HEADERS)
-    if resp.status != 200:
-        return result
-
-    try:
-        items = json.loads(resp.body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return result
-    if not isinstance(items, list):
-        return result
-
-    for item in items:
+    for item in entries:
         if not isinstance(item, dict):
-            continue
-        name = str(item.get("name", "")).lower().strip()
-        item_type = str(item.get("type", "")).strip()
+            raise gl.vm.UserError(f"{_ERR_EXTERNAL} Malformed GitHub repository structure entry")
+        if tree_api:
+            path = item.get("path")
+            item_type = item.get("type")
+            if not isinstance(path, str) or not isinstance(item_type, str):
+                raise gl.vm.UserError(f"{_ERR_EXTERNAL} Malformed GitHub repository tree entry")
+            # Quality indicators are repository-root names, not nested lookalikes.
+            if "/" in path:
+                continue
+            name = path.lower().strip()
+        else:
+            name = item.get("name")
+            item_type = item.get("type")
+            if not isinstance(name, str) or not isinstance(item_type, str):
+                raise gl.vm.UserError(f"{_ERR_EXTERNAL} Malformed GitHub repository contents entry")
+            name = name.lower().strip()
+        item_type = item_type.strip()
 
+        if item_type == "tree" and name in _TEST_DIR_NAMES:
+            result["has_tests"] = True
+        if item_type == "tree" and name in _CI_DIR_NAMES:
+            result["has_ci"] = True
         if item_type == "dir" and name in _TEST_DIR_NAMES:
             result["has_tests"] = True
         if item_type == "dir" and name in _CI_DIR_NAMES:
@@ -493,8 +626,76 @@ def _analyze_quality(owner: str, repo: str) -> dict:
             result["has_ci"] = True
         if name in _BUILD_MANIFESTS:
             result["has_build_manifest"] = True
-
     return result
+
+
+def _incomplete_quality_scan(reason: str) -> None:
+    """Return an actionable, definitive outcome when a complete scan is impossible."""
+    raise gl.vm.UserError(
+        f"{_ERR_EXTERNAL} Repository quality scan is incomplete ({reason}); "
+        "evaluation was not recorded. Reduce the repository tree size or contact "
+        "the treasury owner for manual review, then retry."
+    )
+
+
+def _analyze_quality(owner: str, repo: str, default_branch: str = "") -> dict:
+    """Scan root-level quality indicators with bounded, completeness-aware reads.
+
+    Contents is complete below 1,000 root entries. At its 1,000-item cap, use the
+    recursive Git Trees API, whose `truncated` flag identifies incomplete trees.
+    Trees scans are bounded at 100,000 entries and 8 MiB before JSON parsing.
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents"
+    resp = _github_get(url, _GH_HEADERS)
+    _raise_for_github_transient(resp.status, "repository contents")
+    if resp.status != 200:
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository contents returned {resp.status}")
+
+    if _response_exceeds_limit(resp, MAX_CONTENTS_RESPONSE_BYTES):
+        raise gl.vm.UserError(
+            f"{_ERR_EXTERNAL} GitHub repository contents exceeds the {MAX_CONTENTS_RESPONSE_BYTES}-byte limit"
+        )
+    try:
+        items = json.loads(resp.body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository contents returned malformed JSON")
+    if not isinstance(items, list):
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository contents returned an invalid payload")
+    if len(items) < MAX_GITHUB_DIRECTORY_ITEMS:
+        return _quality_signals_from_root_entries(items)
+
+    # A 1,000-item Contents response is ambiguous: it may be complete or capped.
+    # Resolve completeness against the actual default-branch tree before scoring.
+    if not isinstance(default_branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]{1,255}", default_branch):
+        _incomplete_quality_scan("the repository default branch could not be resolved")
+    tree_url = (
+        f"https://api.github.com/repos/{owner}/{repo}/git/trees/"
+        f"{default_branch}?recursive=1"
+    )
+    tree_resp = _github_get(tree_url, _GH_HEADERS)
+    _raise_for_github_transient(tree_resp.status, "repository Git Trees API")
+    if tree_resp.status == 404:
+        _incomplete_quality_scan("the default branch tree is unavailable")
+    if tree_resp.status != 200:
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository tree returned {tree_resp.status}")
+
+    if _response_exceeds_limit(tree_resp, MAX_GIT_TREE_RESPONSE_BYTES):
+        _incomplete_quality_scan("the repository tree exceeds the 8 MiB response budget")
+    body = tree_resp.body
+    try:
+        tree_data = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository tree returned malformed JSON")
+    if not isinstance(tree_data, dict) or not isinstance(tree_data.get("tree"), list):
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository tree returned an invalid payload")
+    if tree_data.get("truncated") is True:
+        _incomplete_quality_scan("GitHub marked the repository tree as truncated")
+    if tree_data.get("truncated") is not False:
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository tree omitted its truncated flag")
+    entries = tree_data["tree"]
+    if len(entries) > MAX_GIT_TREE_ENTRIES:
+        _incomplete_quality_scan("the repository tree exceeds the 100,000-entry scan budget")
+    return _quality_signals_from_root_entries(entries, tree_api=True)
 
 
 def _quality_bracket(signals: dict) -> str:
@@ -525,38 +726,55 @@ def _fetch_audit_claim(owner: str, repo: str) -> dict:
     Fail-closed: any absence, parse error, traversal attempt, or hash mismatch yields
     an empty, non-verified claim.
     """
-    empty = {"audit_uid": "", "audit_report_hash": "", "audit_integrity": "false"}
+    empty = _audit_claim()
 
     manifest_url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{_ATTESTATION_PATH}"
-    resp = gl.nondet.web.get(manifest_url, headers=_RAW_HEADERS)
+    resp = _github_get(manifest_url, _RAW_HEADERS)
+    _raise_for_github_transient(resp.status, "audit manifest")
+    if resp.status == 404:
+        return empty
     if resp.status != 200:
-        return empty
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub audit manifest returned {resp.status}")
 
+    if _response_exceeds_limit(resp, MAX_AUDIT_MANIFEST_BYTES):
+        return _audit_claim(reason="manifest exceeds the 16 KiB limit")
+    manifest_body = resp.body
     try:
-        manifest = json.loads(resp.body.decode("utf-8"))
+        manifest = json.loads(manifest_body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        return empty
+        return _audit_claim(reason="manifest is not valid JSON")
     if not isinstance(manifest, dict):
-        return empty
+        return _audit_claim(reason="manifest must be a JSON object")
 
-    audit_uid    = _sanitize_token(manifest.get("attestation_uid", ""))
+    audit_uid    = _valid_attestation_uid(manifest.get("attestation_uid", ""))
     claimed_hash = _sanitize_hex64(manifest.get("report_hash", ""))
-    report_path  = str(manifest.get("report_path", "")).lstrip("/")
+    report_path  = manifest.get("report_path", "")
 
     # Reject missing fields or path traversal attempts (fail-closed).
-    if not audit_uid or not claimed_hash or not report_path:
-        return empty
-    if ".." in report_path or report_path.startswith("/") or "\\" in report_path:
-        return {"audit_uid": audit_uid, "audit_report_hash": claimed_hash, "audit_integrity": "false"}
+    if not audit_uid:
+        return _audit_claim(reason="manifest UID is invalid; use 1-64 lowercase letters, digits, dot, underscore, colon, or hyphen")
+    if not claimed_hash:
+        return _audit_claim(audit_uid, reason="manifest SHA-256 hash is invalid")
+    if not _valid_report_path(report_path):
+        return _audit_claim(audit_uid, claimed_hash,
+                            reason="report path must be a safe relative path of at most 256 characters")
 
     report_url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{report_path}"
-    rresp = gl.nondet.web.get(report_url, headers=_RAW_HEADERS)
+    rresp = _github_get(report_url, _RAW_HEADERS)
+    _raise_for_github_transient(rresp.status, "audit report")
     if rresp.status != 200:
-        return {"audit_uid": audit_uid, "audit_report_hash": claimed_hash, "audit_integrity": "false"}
+        return _audit_claim(audit_uid, claimed_hash, reason="report is missing or unavailable")
 
-    computed_hash = hashlib.sha256(rresp.body).hexdigest()
+    if _response_exceeds_limit(rresp, MAX_AUDIT_REPORT_BYTES):
+        return _audit_claim(audit_uid, claimed_hash, reason="report exceeds the 256 KiB limit")
+    report_body = rresp.body
+    if len(report_body) > MAX_AUDIT_REPORT_BYTES:
+        return _audit_claim(audit_uid, claimed_hash, reason="report exceeds the 256 KiB limit")
+
+    computed_hash = hashlib.sha256(report_body).hexdigest()
     integrity = "true" if computed_hash == claimed_hash else "false"
-    return {"audit_uid": audit_uid, "audit_report_hash": claimed_hash, "audit_integrity": integrity}
+    reason = "" if integrity == "true" else "report SHA-256 does not match the manifest"
+    return _audit_claim(audit_uid, claimed_hash, integrity, reason)
 
 
 def _verify_audit_onchain(claim: dict, owner: str, repo: str,
@@ -583,19 +801,18 @@ def _verify_audit_onchain(claim: dict, owner: str, repo: str,
     if record.get("repo", "").lower() != repo.lower():
         return False
 
-    auditor_id = record.get("auditor_id", "")
-    if trusted_auditors.get(auditor_id) != AUDITOR_ACTIVE:
+    auditor_address = _normalize_address(record.get("auditor_id", ""))
+    if not auditor_address or trusted_auditors.get(auditor_address) != AUDITOR_ACTIVE:
         return False
 
     return True
 
 
 def _fetch_maintainer_claim(owner: str, repo: str) -> dict:
-    """Fetch the repository's well-known treasury manifest declaring the payout address.
+    """Fetch a repository-write-access assertion for a payout address.
 
-    The manifest lives at a fixed well-known path that only a principal with write
-    access to the repository can control. It must declare the repository owner login
-    it is published under and the on-chain payout address authorised to receive funds.
+    The manifest is not proof of the repository owner's personal approval. It is an
+    assertion that may be published by any principal with repository write access.
 
     This function performs NO trust decision - it only produces a claim. The binding to
     the real repository owner and the grant recipient are verified deterministically
@@ -603,29 +820,37 @@ def _fetch_maintainer_claim(owner: str, repo: str) -> dict:
 
     Fail-closed: any absence, parse error, or malformed field yields an empty claim.
     """
-    empty = {"declared_owner": "", "payout_address": ""}
+    empty = {"declared_owner": "", "payout_address": "", "error": ""}
 
     manifest_url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{_MAINTAINER_PATH}"
-    resp = gl.nondet.web.get(manifest_url, headers=_RAW_HEADERS)
-    if resp.status != 200:
+    resp = _github_get(manifest_url, _RAW_HEADERS)
+    _raise_for_github_transient(resp.status, "maintainer manifest")
+    if resp.status == 404:
         return empty
+    if resp.status != 200:
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub maintainer manifest returned {resp.status}")
+
+    if _response_exceeds_limit(resp, MAX_MAINTAINER_MANIFEST_BYTES):
+        return {"declared_owner": "", "payout_address": "",
+                "error": "maintainer manifest exceeds the 16 KiB limit"}
 
     try:
         manifest = json.loads(resp.body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        return empty
+        return {"declared_owner": "", "payout_address": "", "error": "maintainer manifest is not valid JSON"}
     if not isinstance(manifest, dict):
-        return empty
+        return {"declared_owner": "", "payout_address": "", "error": "maintainer manifest must be a JSON object"}
 
     declared_owner = _sanitize_token(manifest.get("owner", "")).lower()
     payout_address = _normalize_address(manifest.get("payout_address", ""))
-    return {"declared_owner": declared_owner, "payout_address": payout_address}
+    error = "" if declared_owner and payout_address else "maintainer manifest is missing a valid owner or payout address"
+    return {"declared_owner": declared_owner, "payout_address": payout_address, "error": error}
 
 
 def _verify_maintainer(claim: dict, url_owner: str, api_owner_login: str,
                        recipient_address: str, applicant_address: str = "",
                        allow_demo_bypass: bool = False) -> bool:
-    """Deterministically decide whether the payout recipient is the repository owner.
+    """Check whether a repository write-access assertion matches the grant recipient.
 
     All inputs are derived from the GitHub evidence payload (the repo API owner login
     and the repo-controlled manifest) plus the grant's on-chain recipient. The check
@@ -634,9 +859,11 @@ def _verify_maintainer(claim: dict, url_owner: str, api_owner_login: str,
       - the manifest declares a payout address (fail-closed if absent),
       - the owner login reported by the GitHub API matches the owner in the submitted
         URL (the evidence describes the repository that was actually applied for),
-      - the manifest is published under that same owner login (proving it lives in the
-        owner's repository, not an attacker-controlled fork/name), and
-      - the declared payout address equals the grant's on-chain recipient.
+      - the manifest's owner login matches the GitHub API-reported owner login, and
+      - the asserted payout address equals the grant's on-chain recipient.
+
+    This does not establish that the GitHub owner personally approved the address;
+    a collaborator with repository write access could publish or change the manifest.
 
     Pure and reproducible on every validator.
     """
@@ -645,16 +872,13 @@ def _verify_maintainer(claim: dict, url_owner: str, api_owner_login: str,
         return False
     if str(url_owner).strip().lower() != api_login:
         return False
-    # Missing manifests are common in public OSS repositories, so do not treat
-    # absence alone as proof of a bad project. The repo owner still needs to be
-    # bound to the submitted repository URL. The recipient binding is checked
-    # below when a manifest exists; without one this signal remains unverified.
+    # Missing manifests leave payout authorization unverified; repository ownership
+    # is not inferred from the URL owner or applicant wallet.
     if not claim.get("payout_address", ""):
         # Optional testnet/demo mode permits the submitting wallet to receive its
         # own grant when the repository's GitHub API owner matches the requested
         # URL owner. This is deliberately opt-in: it does not prove that the
-        # submitter controls the GitHub account, so production deployments must
-        # leave it disabled and require the repo-controlled manifest.
+            # submitter controls the GitHub account. This switch is disabled by default.
         return bool(
             allow_demo_bypass
             and _normalize_address(recipient_address)
@@ -677,32 +901,44 @@ def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: d
     owner, repo = _parse_github_url(github_url)
 
     api_url = f"https://api.github.com/repos/{owner}/{repo}"
-    resp = gl.nondet.web.get(api_url, headers=_GH_HEADERS)
+    resp = _github_get(api_url, _GH_HEADERS)
 
+    _raise_for_github_transient(resp.status, "repository API")
     if resp.status == 404:
         raise gl.vm.UserError(f"{_ERR_EXTERNAL} Repository not found: {github_url}")
-    if resp.status in (403, 429):
-        raise gl.vm.UserError(f"{_ERR_TRANSIENT} GitHub rate limited")
-    if resp.status >= 500:
-        raise gl.vm.UserError(f"{_ERR_TRANSIENT} GitHub API unavailable ({resp.status})")
     if resp.status != 200:
         raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repo API returned {resp.status}")
+    if _response_exceeds_limit(resp, MAX_REPOSITORY_RESPONSE_BYTES):
+        raise gl.vm.UserError(
+            f"{_ERR_EXTERNAL} GitHub repository metadata exceeds the {MAX_REPOSITORY_RESPONSE_BYTES}-byte limit"
+        )
 
     try:
         repo_data = json.loads(resp.body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        raise gl.vm.UserError(f"{_ERR_TRANSIENT} Malformed JSON from GitHub repo API")
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository API returned malformed JSON")
 
     if not isinstance(repo_data, dict):
-        raise gl.vm.UserError(f"{_ERR_TRANSIENT} Unexpected response shape from GitHub")
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository API returned an invalid payload")
 
-    # Extract the repository owner login from the evidence payload. This is the real
-    # repository owner GitHub reports, used to bind the payout recipient.
+    # Forks inherit the upstream's history and metrics, so they cannot attest
+    # to the applicant's own work.
+    if repo_data.get("fork", False) is True:
+        raise gl.vm.UserError(
+            f"{_ERR_EXPECTED} {ERR_FORKED_REPO_UNSUPPORTED}: forked repositories cannot receive grants"
+        )
+
+    # Extract the owner login GitHub reports. It binds the repository-write-access
+    # payout assertion to the repository identity; it does not prove personal approval.
     owner_block = repo_data.get("owner") if isinstance(repo_data.get("owner"), dict) else {}
     owner_login: str = str(owner_block.get("login") or "").strip()
+    if not owner_login:
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository owner is missing")
 
     # Extract stable license field
     license_block = repo_data.get("license") or {}
+    if not isinstance(license_block, dict):
+        raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub repository license data is invalid")
     raw_spdx: str = str(license_block.get("spdx_id") or "").strip()
     if raw_spdx in ("NOASSERTION", "N/A", "OTHER", ""):
         license_spdx = ""
@@ -714,15 +950,15 @@ def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: d
     commit_signals = _fetch_commit_signals(owner, repo)
 
     # Structural quality signals (anti-gaming)
-    quality_signals = _analyze_quality(owner, repo)
+    default_branch = repo_data.get("default_branch", "")
+    quality_signals = _analyze_quality(owner, repo, default_branch)
     quality_bracket = _quality_bracket(quality_signals)
 
     # Audit: fetch integrity-checked claim, then verify against on-chain attestation.
     claim = _fetch_audit_claim(owner, repo)
     has_audit: bool = _verify_audit_onchain(claim, owner, repo, trusted_auditors, attestations)
 
-    # Maintainer binding: fetch the repo-controlled payout manifest and verify the
-    # grant recipient is the repository owner authorised to receive funds.
+    # Compare the grant recipient to a repository write-access holder's assertion.
     maintainer_claim = _fetch_maintainer_claim(owner, repo)
     maintainer_verified: bool = _verify_maintainer(
         maintainer_claim, owner, owner_login, recipient_address,
@@ -739,6 +975,13 @@ def _fetch_repo_metrics(github_url: str, trusted_auditors: dict, attestations: d
         "contributor_bracket": commit_signals["contributor_bracket"],
         "quality_bracket":     quality_bracket,
         "has_audit":           has_audit,
+        "audit_evidence_status": claim.get("audit_reason", "") or (
+            "verified" if has_audit else "not verified"
+        ),
+        "maintainer_evidence_status": maintainer_claim.get("error", "") or (
+            "manifest assertion matches the grant recipient"
+            if maintainer_verified else "payout assertion is missing or does not match"
+        ),
         "audit_uid":           claim["audit_uid"] if has_audit else "",
         "maintainer_verified": maintainer_verified,
         "maintainer_login":    owner_login if maintainer_verified else "",
@@ -771,6 +1014,12 @@ def _build_evaluation_prompt(constitution: str, owner: str, repo: str, metrics: 
         "license_spdx":         _sanitize_external_text(metrics["license_spdx"] or "None", 60),
         "osi_approved_license": bool(metrics["is_osi_approved"]),
         "audit_attestation_verified_onchain": bool(metrics["has_audit"]),
+        "audit_evidence_status": _sanitize_external_text(
+            metrics.get("audit_evidence_status", "not verified"), 120
+        ),
+        "maintainer_evidence_status": _sanitize_external_text(
+            metrics.get("maintainer_evidence_status", "not verified"), 120
+        ),
     }
     data_json = json.dumps(untrusted, ensure_ascii=True, sort_keys=True)
 
@@ -798,6 +1047,10 @@ def _build_evaluation_prompt(constitution: str, owner: str, repo: str, metrics: 
         "- Do NOT invent requirements absent from the constitution.\n"
         "- Do NOT approve a project that violates any explicit constitutional requirement.\n"
         "- Treat 'audit_attestation_verified_onchain' as the sole source of audit truth.\n"
+        "- 'audit_evidence_status' explains whether a repository audit claim was verified; "
+        "it does not override the boolean audit truth field.\n"
+        "- The payout manifest is an assertion by a repository write-access holder, not proof "
+        "of personal approval by the GitHub owner.\n"
         "- Cite specific constitution clauses in your reasoning.\n\n"
         'Respond with valid JSON ONLY - no markdown, no extra text:\n'
         '{"decision": "APPROVED" or "REJECTED", '
@@ -877,15 +1130,51 @@ def _compute_tier(commit_bracket: str, is_osi_approved: bool, has_audit: bool,
     return TIER_3
 
 
+def _error_message(err) -> str:
+    """Extract an error message the same way on leader and validator.
+
+    UserError payloads surface as ``data`` on some runtimes and ``message`` on
+    others; checking only one makes the two sides disagree on identical errors.
+    """
+    for candidate in (getattr(err, "data", None), getattr(err, "message", None)):
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    args = getattr(err, "args", None)
+    if args and isinstance(args[0], str) and args[0]:
+        return args[0]
+    return str(err)
+
+
+def _parse_iso_timestamp(value):
+    """Parse a GitHub ISO-8601 UTC timestamp (YYYY-MM-DDTHH:MM:SSZ) to epoch seconds."""
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:Z|\+00:00)", value.strip())
+    if not match:
+        return None
+    year, month, day, hour, minute, second = (int(part) for part in match.groups())
+    if not (1970 <= year <= 9999 and 1 <= month <= 12 and 1 <= day <= 31
+            and hour < 24 and minute < 60 and second < 61):
+        return None
+    # Days-from-civil (Howard Hinnant), no datetime dependency.
+    y = year - (month <= 2)
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    days = era * 146097 + doe - 719468
+    return days * 86400 + hour * 3600 + minute * 60 + second
+
+
 def _handle_leader_error(leaders_res, leader_fn) -> bool:
     """Canonical error handler for the validator when the leader returned an error result."""
-    leader_msg: str = getattr(leaders_res, "message", "")
+    leader_msg: str = _error_message(leaders_res)
     try:
         leader_fn()
         # Leader errored, validator succeeded - nodes diverged
         return False
     except gl.vm.UserError as exc:
-        validator_msg: str = getattr(exc, "message", str(exc))
+        validator_msg: str = _error_message(exc)
         # Deterministic errors: both sides must report the identical message
         if (validator_msg.startswith(_ERR_EXPECTED)
                 or validator_msg.startswith(_ERR_EXTERNAL)):
@@ -945,9 +1234,9 @@ class LexiTreasury(gl.contract.Contract):
 
     # Audit attestation registry
     trusted_auditors:  gl.storage.TreeMap[str, str]              # auditor_id -> AUDITOR_ACTIVE/REVOKED
-    auditor_ids:       gl.storage.DynArray[str]                  # iteration index for trusted_auditors
+    auditor_ids:       gl.storage.DynArray[str]                  # lifetime-capped, max MAX_AUDITORS
     audit_attestations: gl.storage.TreeMap[str, AuditAttestation]  # attestation_uid -> record
-    audit_uids:        gl.storage.DynArray[str]                  # iteration index for audit_attestations
+    audit_uids:        gl.storage.DynArray[str]                  # lifetime-capped, max MAX_AUDIT_ATTESTATIONS
 
     # ---------------------------------------------------------------
     # Constructor
@@ -959,11 +1248,10 @@ class LexiTreasury(gl.contract.Contract):
         tier_cap_1: int,
         tier_cap_2: int,
         tier_cap_3: int,
-        allow_demo_owner_payout: bool = True,
+        allow_demo_owner_payout: bool = False,
     ) -> None:
         """Deploy the LexiTreasury with an initial constitution and per-tier funding caps."""
-        if not constitution.strip():
-            raise gl.vm.UserError(f"{_ERR_EXPECTED} Constitution cannot be empty")
+        constitution_text = _normalized_constitution(constitution)
         if tier_cap_1 < 0 or tier_cap_2 < 0 or tier_cap_3 < 0:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Tier caps must be non-negative")
         if not (tier_cap_1 >= tier_cap_2 >= tier_cap_3):
@@ -972,7 +1260,7 @@ class LexiTreasury(gl.contract.Contract):
             )
 
         self.owner             = Address(str(gl.message.sender_address))
-        self.constitution      = constitution.strip()
+        self.constitution      = constitution_text
         self.allow_demo_owner_payout = bool(allow_demo_owner_payout)
         self.treasury_balance  = u256(0)
         self.total_escrowed    = u256(0)
@@ -1023,7 +1311,15 @@ class LexiTreasury(gl.contract.Contract):
 
     @gl.public.view
     def get_accounting(self) -> dict:
+        # Every unit the contract owes: unallocated reserve, funded-grant escrow
+        # and released-but-unwithdrawn payouts.
+        liabilities = (int(self.treasury_balance) + int(self.total_grant_escrow)
+                       + int(self.total_escrowed))
+        contract_balance = int(self.balance)
         return {
+            "contract_balance": contract_balance,
+            "total_liabilities": liabilities,
+            "is_solvent": contract_balance >= liabilities,
             "grant_escrow": int(self.total_grant_escrow),
             "total_released": int(self.total_released),
             "total_refunded": int(self.total_refunded),
@@ -1065,6 +1361,8 @@ class LexiTreasury(gl.contract.Contract):
         return {
             "index": index, "title": milestone.title, "criteria": milestone.criteria,
             "amount": int(milestone.amount), "deadline": int(milestone.deadline),
+            "adjudication_deadline": int(milestone.deadline) + ADJUDICATION_GRACE_WINDOW,
+            "funded_at": int(milestone.funded_at), "submitted_at": int(milestone.submitted_at),
             "status": milestone.status, "attempts": int(milestone.attempts),
             "max_attempts": MAX_ATTEMPTS, "evidence_url": milestone.evidence_url,
             "commit_sha": milestone.commit_sha, "decision": milestone.decision,
@@ -1102,12 +1400,14 @@ class LexiTreasury(gl.contract.Contract):
 
     @gl.public.view
     def is_trusted_auditor(self, auditor_id: str) -> bool:
-        key = _sanitize_token(auditor_id).lower()
+        key = _normalize_address(auditor_id)
         return self.trusted_auditors.get(key, "") == AUDITOR_ACTIVE
 
     @gl.public.view
     def get_audit_attestation(self, attestation_uid: str) -> dict:
-        key = _sanitize_token(attestation_uid)
+        key = _valid_attestation_uid(attestation_uid)
+        if not key:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Invalid attestation UID")
         if key not in self.audit_attestations:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Unknown attestation: {attestation_uid!r}")
         a = self.audit_attestations[key]
@@ -1123,6 +1423,9 @@ class LexiTreasury(gl.contract.Contract):
 
     @gl.public.view
     def get_trusted_auditors(self) -> list:
+        """Return active addresses; lifetime registry capacity bounds this list to 64."""
+        if len(self.auditor_ids) > MAX_AUDITORS:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Auditor registry exceeds its safety capacity")
         out = []
         for aid in self.auditor_ids:
             if self.trusted_auditors.get(aid, "") == AUDITOR_ACTIVE:
@@ -1153,19 +1456,23 @@ class LexiTreasury(gl.contract.Contract):
     @gl.public.write
     def create_grant(self, title: str, repository_url: str, recipient: str,
                      milestones_json: str) -> str:
+        if not isinstance(title, str) or not isinstance(repository_url, str):
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Title and repository URL must be strings")
+        if not isinstance(recipient, str) or not isinstance(milestones_json, str):
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Recipient and milestone plan must be strings")
         title = title.strip()
-        repository_url = repository_url.strip()
         recipient_key = _normalize_address(recipient)
-        if not title or len(title) > MAX_TITLE:
+        if (not title or len(title) > MAX_TITLE
+                or len(title.encode("utf-8")) > MAX_TITLE * 4):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Invalid grant title")
-        if len(repository_url) > MAX_EVIDENCE_URL:
-            raise gl.vm.UserError(f"{_ERR_EXPECTED} Repository URL is too long")
-        if not _REPOSITORY_URL.fullmatch(repository_url):
+        repo_parts = _canonical_github_repo(repository_url)
+        if repo_parts is None:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Repository must be a canonical HTTPS GitHub URL")
-        _parse_github_url(repository_url)
+        if len(repository_url.encode("utf-8")) > MAX_EVIDENCE_URL:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Repository URL is too long")
         if not recipient_key:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Invalid recipient address")
-        if len(milestones_json) > 16000:
+        if len(milestones_json.encode("utf-8")) > 16000:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Milestone plan is too large")
         try:
             definitions = json.loads(milestones_json)
@@ -1180,9 +1487,13 @@ class LexiTreasury(gl.contract.Contract):
             if not isinstance(item, dict) or set(item) != {"title", "criteria", "amount", "deadline"}:
                 raise gl.vm.UserError(f"{_ERR_EXPECTED} Invalid milestone fields")
             step_title, criteria, amount_text, deadline = item["title"], item["criteria"], item["amount"], item["deadline"]
-            if not isinstance(step_title, str) or not step_title.strip() or len(step_title.strip()) > MAX_TITLE:
+            if (not isinstance(step_title, str) or not step_title.strip()
+                    or len(step_title.strip()) > MAX_TITLE
+                    or len(step_title.strip().encode("utf-8")) > MAX_TITLE * 4):
                 raise gl.vm.UserError(f"{_ERR_EXPECTED} Invalid milestone title")
-            if not isinstance(criteria, str) or not criteria.strip() or len(criteria.strip()) > MAX_CRITERIA:
+            if (not isinstance(criteria, str) or not criteria.strip()
+                    or len(criteria.strip()) > MAX_CRITERIA
+                    or len(criteria.strip().encode("utf-8")) > MAX_CRITERIA * 4):
                 raise gl.vm.UserError(f"{_ERR_EXPECTED} Invalid milestone criteria")
             if not isinstance(amount_text, str) or not re.fullmatch(r"[1-9][0-9]{0,77}", amount_text):
                 raise gl.vm.UserError(f"{_ERR_EXPECTED} Invalid milestone amount")
@@ -1215,7 +1526,8 @@ class LexiTreasury(gl.contract.Contract):
             step_title, criteria, amount, deadline = definition
             self.milestones[self._milestone_key(grant_id, index)] = Milestone(
                 title=step_title, criteria=criteria, amount=u256(amount),
-                deadline=u256(deadline), status=MILESTONE_READY, attempts=u256(0),
+                deadline=u256(deadline), funded_at=u256(0), submitted_at=u256(0),
+                status=MILESTONE_READY, attempts=u256(0),
                 evidence_url="", commit_sha="", decision="", reason_code="",
                 summary="", released_amount=u256(0),
             )
@@ -1244,11 +1556,18 @@ class LexiTreasury(gl.contract.Contract):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Grant is not approved for funding")
         if grant.maintainer_verified != "true" or grant.allocated_amount != grant.total_amount:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Grant is not fully qualified for funding")
+        # Funding uses the approval-time eligibility snapshot. Subsequent cap changes
+        # apply to future evaluations and do not strand an already approved grant.
         if self.treasury_balance < grant.total_amount:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Insufficient treasury reserve")
+        funded_at = _now()
         for index in range(int(grant.milestone_count)):
-            if int(self.milestones[self._milestone_key(grant_id, index)].deadline) <= _now():
+            key = self._milestone_key(grant_id, index)
+            milestone = self.milestones[key]
+            if int(milestone.deadline) <= funded_at:
                 raise gl.vm.UserError(f"{_ERR_EXPECTED} Milestone deadline has passed")
+            milestone.funded_at = u256(funded_at)
+            self.milestones[key] = milestone
         grant.remaining_amount = grant.total_amount
         grant.status = STATUS_FUNDED
         self.treasury_balance = self.treasury_balance - grant.total_amount
@@ -1270,6 +1589,11 @@ class LexiTreasury(gl.contract.Contract):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Milestone deadline has passed")
         if milestone.status not in (MILESTONE_READY, MILESTONE_REJECTED) or int(milestone.attempts) >= MAX_ATTEMPTS:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Milestone is not ready for another submission")
+        if (not isinstance(evidence_url, str)
+                or len(evidence_url.encode("utf-8")) > MAX_EVIDENCE_URL):
+            raise gl.vm.UserError(
+                f"{_ERR_EXPECTED} Evidence URL must be a string no longer than {MAX_EVIDENCE_URL} bytes"
+            )
         parts = _commit_parts(evidence_url)
         if not parts:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Evidence must pin a GitHub commit SHA")
@@ -1280,45 +1604,90 @@ class LexiTreasury(gl.contract.Contract):
         milestone.evidence_url = evidence_url.strip()
         milestone.commit_sha = sha
         milestone.status = MILESTONE_SUBMITTED
+        milestone.submitted_at = u256(_now())
         milestone.attempts = milestone.attempts + u256(1)
         grant.status = STATUS_IN_PROGRESS
         self.milestones[key] = milestone
         self.grants[grant_id] = grant
         return int(milestone.attempts)
 
-    def _fetch_commit_evidence(self, owner_name: str, repo_name: str, sha: str) -> dict:
-        response = gl.nondet.web.get(
+    def _fetch_commit_evidence(self, owner_name: str, repo_name: str, sha: str,
+                               funded_at: int = 0, expected_login: str = "") -> dict:
+        response = _github_get(
             f"https://api.github.com/repos/{owner_name}/{repo_name}/commits/{sha}",
-            headers={"Accept": "application/vnd.github+json"},
+            {"Accept": "application/vnd.github+json"},
         )
-        if response.status == 404:
-            raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub commit was not found")
-        if response.status in (403, 429):
-            raise gl.vm.UserError(f"{_ERR_TRANSIENT} GitHub rate limited")
-        if response.status >= 500:
-            raise gl.vm.UserError(f"{_ERR_TRANSIENT} GitHub is temporarily unavailable")
+        _raise_for_github_transient(response.status, "commit evidence")
         if response.status != 200:
-            raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub returned status {response.status}")
+            reason = "Commit was not found on GitHub." if response.status == 404 else "GitHub did not return a reviewable commit record."
+            return {"complete": False, "reason": reason}
+        if _response_exceeds_limit(response, MAX_COMMIT_RESPONSE_BYTES):
+            return {"complete": False, "reason": "GitHub commit response exceeds the review limit."}
         try:
             body = json.loads(response.body.decode("utf-8"))
-            if str(body.get("sha", "")).lower() != sha:
-                raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub commit SHA did not match")
+            if not isinstance(body, dict) or str(body.get("sha", "")).lower() != sha:
+                return {"complete": False, "reason": "GitHub did not return a reviewable commit record."}
+            commit = body.get("commit")
+            if not isinstance(commit, dict):
+                return {"complete": False, "reason": "GitHub did not return a reviewable commit record."}
+            message = commit.get("message")
+            author = commit.get("author")
+            author_date = author.get("date") if isinstance(author, dict) else None
+            if (not isinstance(message, str) or len(message) > MAX_COMMIT_MESSAGE_CHARS or
+                    not isinstance(author_date, str) or len(author_date) > MAX_COMMIT_AUTHOR_DATE_CHARS):
+                return {"complete": False, "reason": "Commit metadata exceeds the review limit."}
+            # Author binding: the GitHub-resolved account (not the spoofable git
+            # config name/email) must be the verified maintainer of the grant.
+            api_author = body.get("author")
+            author_login = str(api_author.get("login") or "").strip().lower() if isinstance(api_author, dict) else ""
+            if not expected_login or author_login != expected_login.strip().lower():
+                return {"complete": False,
+                        "reason": "Commit author does not match the verified grant maintainer."}
+            # Freshness: reject commits that predate funding. Both author and
+            # committer dates must be on or after funded_at.
+            committer = commit.get("committer")
+            committer_date = committer.get("date") if isinstance(committer, dict) else None
+            for stamp in (author_date, committer_date if committer_date is not None else author_date):
+                moment = _parse_iso_timestamp(stamp)
+                if moment is None or moment < funded_at:
+                    return {"complete": False,
+                            "reason": "Commit predates grant funding or has an invalid timestamp."}
+            raw_files = body.get("files")
+            if not isinstance(raw_files, list) or not raw_files:
+                return {"complete": False, "reason": "GitHub did not return a reviewable commit record."}
+            if len(raw_files) > MAX_COMMIT_FILES:
+                return {"complete": False, "reason": "Commit has more files than the review limit."}
             files = []
-            for item in body.get("files", [])[:MAX_COMMIT_FILES]:
-                if isinstance(item, dict):
-                    files.append({"path": _external_text(item.get("filename", ""), 240),
-                                  "status": _external_text(item.get("status", ""), 30),
-                                  "additions": int(item.get("additions", 0)),
-                                  "deletions": int(item.get("deletions", 0)),
-                                  "patch": _external_text(item.get("patch", ""), MAX_PATCH_CHARS)})
-            commit = body.get("commit", {})
-            return {"sha": sha, "message": _external_text(commit.get("message", ""), 1200),
-                    "author_date": _external_text(commit.get("author", {}).get("date", ""), 80),
-                    "files": files}
-        except gl.vm.UserError:
-            raise
+            for item in raw_files:
+                if not isinstance(item, dict):
+                    return {"complete": False, "reason": "GitHub did not return a reviewable commit record."}
+                path = item.get("filename")
+                status = item.get("status")
+                patch = item.get("patch")
+                additions = item.get("additions")
+                deletions = item.get("deletions")
+                if (not isinstance(path, str) or not path or len(path) > MAX_COMMIT_PATH_CHARS or
+                        not isinstance(status, str) or not status or len(status) > MAX_COMMIT_STATUS_CHARS or
+                        not isinstance(additions, int) or isinstance(additions, bool) or additions < 0 or
+                        not isinstance(deletions, int) or isinstance(deletions, bool) or deletions < 0):
+                    return {"complete": False, "reason": "GitHub did not return a reviewable commit record."}
+                if not isinstance(patch, str) or not patch:
+                    return {"complete": False, "reason": "A changed file is missing reviewable patch text."}
+                if len(patch) > MAX_PATCH_CHARS:
+                    return {"complete": False, "reason": "A changed file patch exceeds the review limit."}
+                files.append({"path": _external_text(path, MAX_COMMIT_PATH_CHARS),
+                              "status": _external_text(status, MAX_COMMIT_STATUS_CHARS),
+                              "additions": additions, "deletions": deletions,
+                              "patch": _external_text(patch, MAX_PATCH_CHARS)})
+            evidence = {"sha": sha, "message": _external_text(message, MAX_COMMIT_MESSAGE_CHARS),
+                        "author_date": _external_text(author_date, MAX_COMMIT_AUTHOR_DATE_CHARS),
+                        "files": files}
+            evidence_bytes = len(json.dumps(evidence, ensure_ascii=True, sort_keys=True).encode("utf-8"))
+            if evidence_bytes > MAX_COMMIT_EVIDENCE_BYTES:
+                return {"complete": False, "reason": "Commit evidence exceeds the total review limit."}
+            return {"complete": True, "evidence": evidence}
         except Exception:
-            raise gl.vm.UserError(f"{_ERR_EXTERNAL} GitHub commit response was invalid")
+            return {"complete": False, "reason": "GitHub did not return a reviewable commit record."}
 
     def _judge_milestone(self, criteria: str, evidence: dict) -> dict:
         prompt = (
@@ -1352,15 +1721,26 @@ class LexiTreasury(gl.contract.Contract):
         if grant is None or grant.status not in (STATUS_FUNDED, STATUS_IN_PROGRESS):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Grant is not open for adjudication")
         milestone = self.milestones[self._milestone_key(grant_id, int(grant.current_index))]
-        if milestone.status != MILESTONE_SUBMITTED or _now() >= int(milestone.deadline):
-            raise gl.vm.UserError(f"{_ERR_EXPECTED} No timely submission to adjudicate")
+        if milestone.status != MILESTONE_SUBMITTED:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} No submitted evidence to adjudicate")
         parts = _commit_parts(milestone.evidence_url)
         if not parts:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Stored evidence URL is invalid")
         owner_name, repo_name, sha = parts
         criteria = milestone.criteria
+        funded_at = int(milestone.funded_at)
+        expected_login = grant.maintainer_login
+        # Submission was gated on the submission deadline, so adjudication may land
+        # after it. Only a submission that somehow postdates it is refused.
+        if int(milestone.submitted_at) >= int(milestone.deadline):
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Evidence was not submitted before the deadline")
         def review() -> dict:
-            return self._judge_milestone(criteria, self._fetch_commit_evidence(owner_name, repo_name, sha))
+            evidence_result = self._fetch_commit_evidence(
+                owner_name, repo_name, sha, funded_at, expected_login)
+            if not evidence_result["complete"]:
+                return {"decision": "REJECT", "reason_code": REASON_INCOMPLETE,
+                        "summary": evidence_result["reason"]}
+            return self._judge_milestone(criteria, evidence_result["evidence"])
         def validator(leaders_res) -> bool:
             if not isinstance(leaders_res, gl.vm.Return):
                 return _handle_leader_error(leaders_res, review)
@@ -1375,7 +1755,8 @@ class LexiTreasury(gl.contract.Contract):
         milestone.reason_code = result["reason_code"]
         milestone.summary = result["summary"]
         milestone.status = MILESTONE_APPROVED if result["decision"] == "APPROVE" else MILESTONE_REJECTED
-        if milestone.status == MILESTONE_REJECTED and int(milestone.attempts) >= MAX_ATTEMPTS:
+        if (milestone.status == MILESTONE_REJECTED and
+                (int(milestone.attempts) >= MAX_ATTEMPTS or _now() >= int(milestone.deadline))):
             grant.status = STATUS_REFUNDABLE
         self.milestones[self._milestone_key(grant_id, int(grant.current_index))] = milestone
         self.grants[grant_id] = grant
@@ -1395,7 +1776,12 @@ class LexiTreasury(gl.contract.Contract):
         key = self._milestone_key(grant_id, index)
         milestone = self.milestones[key]
         amount = milestone.amount
-        if milestone.status != MILESTONE_APPROVED or grant.remaining_amount < amount or self.total_grant_escrow < amount:
+        grant_accounted = (int(grant.remaining_amount) + int(grant.released_amount)
+                           + int(grant.refunded_amount))
+        if grant_accounted != int(grant.total_amount):
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Grant accounting invariant is inconsistent")
+        if (milestone.status != MILESTONE_APPROVED or grant.remaining_amount < amount
+                or self.total_grant_escrow < grant.remaining_amount):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Approved tranche or escrow missing")
         grant.remaining_amount = grant.remaining_amount - amount
         grant.released_amount = grant.released_amount + amount
@@ -1419,7 +1805,13 @@ class LexiTreasury(gl.contract.Contract):
         key = self._milestone_key(grant_id, int(grant.current_index))
         milestone = self.milestones[key]
         exhausted = int(milestone.attempts) >= MAX_ATTEMPTS and milestone.status == MILESTONE_REJECTED
-        if milestone.status == MILESTONE_APPROVED or (not exhausted and _now() < int(milestone.deadline)):
+        stale_submission = (milestone.status == MILESTONE_SUBMITTED
+                            and _now() >= int(milestone.deadline) + ADJUDICATION_GRACE_WINDOW)
+        if milestone.status == MILESTONE_SUBMITTED and not stale_submission:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Submitted evidence must be adjudicated before expiry")
+        if not stale_submission and milestone.status not in (MILESTONE_READY, MILESTONE_REJECTED):
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Milestone cannot be expired in this state")
+        if not exhausted and not stale_submission and _now() < int(milestone.deadline):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Milestone is not refundable yet")
         milestone.status = MILESTONE_EXPIRED
         grant.status = STATUS_REFUNDABLE
@@ -1432,6 +1824,10 @@ class LexiTreasury(gl.contract.Contract):
         if grant is None or grant.status != STATUS_REFUNDABLE:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Grant is not refundable")
         amount = grant.remaining_amount
+        grant_accounted = (int(grant.remaining_amount) + int(grant.released_amount)
+                           + int(grant.refunded_amount))
+        if grant_accounted != int(grant.total_amount):
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Grant accounting invariant is inconsistent")
         if amount <= u256(0) or self.total_grant_escrow < amount:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} No refundable escrow remains")
         grant.remaining_amount = u256(0)
@@ -1456,6 +1852,8 @@ class LexiTreasury(gl.contract.Contract):
         amount: u256 = self.claimable.get(caller_key, u256(0)) if caller_key else u256(0)
         if amount == u256(0):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} No claimable balance to withdraw")
+        if self.total_escrowed < amount:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Claimable escrow accounting is inconsistent")
 
         # Effects first: zero the balance and reduce the escrow total before the transfer.
         self.claimable[caller_key] = u256(0)
@@ -1472,9 +1870,7 @@ class LexiTreasury(gl.contract.Contract):
             raise gl.vm.UserError(
                 f"{_ERR_EXPECTED} Only the owner can update the constitution"
             )
-        if not new_constitution.strip():
-            raise gl.vm.UserError(f"{_ERR_EXPECTED} Constitution cannot be empty")
-        self.constitution = new_constitution.strip()
+        self.constitution = _normalized_constitution(new_constitution)
 
     @gl.public.write
     def set_tier_caps(self, cap_1: int, cap_2: int, cap_3: int) -> None:
@@ -1492,18 +1888,22 @@ class LexiTreasury(gl.contract.Contract):
         self.tier_cap_3 = u256(cap_3)
 
     # ---------------------------------------------------------------
-    # Audit attestation registry (owner-managed trust anchor)
+    # Auditor-address registry and submitted audit attestations
     # ---------------------------------------------------------------
 
     @gl.public.write
     def register_trusted_auditor(self, auditor_id: str) -> None:
-        """Add or re-activate a trusted auditor identity. Owner-only."""
+        """Add or re-activate a trusted auditor wallet address. Owner-only."""
         if _normalize_address(str(gl.message.sender_address)) != _normalize_address(str(self.owner)):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Only the owner can register auditors")
-        key = _sanitize_token(auditor_id).lower()
+        key = _normalize_address(auditor_id)
         if not key:
-            raise gl.vm.UserError(f"{_ERR_EXPECTED} auditor_id is required")
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} auditor_id is required and must be a valid wallet address")
         if key not in self.trusted_auditors:
+            if len(self.auditor_ids) >= MAX_AUDITORS:
+                raise gl.vm.UserError(
+                    f"{_ERR_EXPECTED} Auditor registry is full ({MAX_AUDITORS}); no new auditor can be registered"
+                )
             self.auditor_ids.append(key)
         self.trusted_auditors[key] = AUDITOR_ACTIVE
 
@@ -1513,7 +1913,9 @@ class LexiTreasury(gl.contract.Contract):
         Owner-only."""
         if _normalize_address(str(gl.message.sender_address)) != _normalize_address(str(self.owner)):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Only the owner can revoke auditors")
-        key = _sanitize_token(auditor_id).lower()
+        key = _normalize_address(auditor_id)
+        if not key:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Invalid auditor wallet address")
         if key not in self.trusted_auditors:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Unknown auditor: {auditor_id!r}")
         self.trusted_auditors[key] = AUDITOR_REVOKED
@@ -1526,22 +1928,31 @@ class LexiTreasury(gl.contract.Contract):
         auditor_id: str,
         report_hash: str,
     ) -> None:
-        """Record an on-chain audit attestation binding a repo to a hashed report. Owner-only.
+        """Record an audit attestation from its registered auditor wallet.
 
-        The attestation is the cryptographic trust anchor: a grant's audit is honoured
-        only when its published manifest references a UID recorded here, the report bytes
-        hash to report_hash, the repo binding matches, and the issuing auditor is trusted.
+        The transaction sender authenticates the auditor address. The treasury owner
+        controls only registration and revocation; it cannot attest in another wallet's
+        name. A grant accepts the record only while that auditor remains active and when
+        its manifest, report hash, and repository binding all match.
         """
-        if _normalize_address(str(gl.message.sender_address)) != _normalize_address(str(self.owner)):
-            raise gl.vm.UserError(f"{_ERR_EXPECTED} Only the owner can record attestations")
-
-        uid = _sanitize_token(attestation_uid)
+        uid = _valid_attestation_uid(attestation_uid)
         if not uid:
-            raise gl.vm.UserError(f"{_ERR_EXPECTED} attestation_uid is required")
+            raise gl.vm.UserError(
+                f"{_ERR_EXPECTED} Invalid attestation UID; use 1-64 lowercase letters, digits, dot, underscore, colon, or hyphen"
+            )
         if uid in self.audit_attestations:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Attestation {uid!r} already exists")
+        if len(self.audit_uids) >= MAX_AUDIT_ATTESTATIONS:
+            raise gl.vm.UserError(
+                f"{_ERR_EXPECTED} Audit attestation registry is full ({MAX_AUDIT_ATTESTATIONS}); no new record can be added"
+            )
 
-        auditor_key = _sanitize_token(auditor_id).lower()
+        auditor_key = _normalize_address(auditor_id)
+        sender = _normalize_address(str(gl.message.sender_address))
+        if not auditor_key or sender != auditor_key:
+            raise gl.vm.UserError(
+                f"{_ERR_EXPECTED} Only the named auditor wallet can record its attestation"
+            )
         if self.trusted_auditors.get(auditor_key, "") != AUDITOR_ACTIVE:
             raise gl.vm.UserError(
                 f"{_ERR_EXPECTED} auditor {auditor_id!r} is not a trusted active auditor"
@@ -1553,7 +1964,12 @@ class LexiTreasury(gl.contract.Contract):
                 f"{_ERR_EXPECTED} report_hash must be a 64-char sha256 hex digest"
             )
 
-        owner_name, repo_name = _parse_github_url(github_url.strip())
+        repo_parts = _canonical_github_repo(github_url)
+        if repo_parts is None:
+            raise gl.vm.UserError(
+                f"{_ERR_EXPECTED} Attestation repository must be a canonical HTTPS GitHub URL"
+            )
+        owner_name, repo_name = repo_parts
 
         self.audit_attestations[uid] = AuditAttestation(
             attestation_uid = uid,
@@ -1571,7 +1987,9 @@ class LexiTreasury(gl.contract.Contract):
         """Revoke an on-chain audit attestation. Owner-only."""
         if _normalize_address(str(gl.message.sender_address)) != _normalize_address(str(self.owner)):
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Only the owner can revoke attestations")
-        uid = _sanitize_token(attestation_uid)
+        uid = _valid_attestation_uid(attestation_uid)
+        if not uid:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Invalid attestation UID")
         if uid not in self.audit_attestations:
             raise gl.vm.UserError(f"{_ERR_EXPECTED} Unknown attestation: {attestation_uid!r}")
         record = self.audit_attestations[uid]
@@ -1608,6 +2026,13 @@ class LexiTreasury(gl.contract.Contract):
                 f"{_ERR_EXPECTED} Grant {grant_id!r} is not a DRAFT "
                 f"(current status: {grant.status!r})"
             )
+
+        # These guards keep any legacy/corrupt storage state from turning a
+        # consensus evaluation into an unbounded pre-nondeterministic scan.
+        if len(self.auditor_ids) > MAX_AUDITORS:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Auditor registry exceeds its safety capacity")
+        if len(self.audit_uids) > MAX_AUDIT_ATTESTATIONS:
+            raise gl.vm.UserError(f"{_ERR_EXPECTED} Attestation registry exceeds its safety capacity")
 
         # Snapshot all storage reads before entering the nondet context.
         constitution: str  = self.constitution
@@ -1646,6 +2071,16 @@ class LexiTreasury(gl.contract.Contract):
             decision, reasoning = _run_llm_evaluation(
                 constitution, metrics["owner"], metrics["repo"], metrics
             )
+            evidence_notes = []
+            audit_note = metrics.get("audit_evidence_status", "")
+            maintainer_note = metrics.get("maintainer_evidence_status", "")
+            if audit_note not in ("", "verified", "not verified"):
+                evidence_notes.append(f"Audit evidence: {audit_note}.")
+            if maintainer_note not in ("", "manifest assertion matches the grant recipient",
+                                       "payout assertion is missing or does not match"):
+                evidence_notes.append(f"Payout assertion: {maintainer_note}.")
+            if evidence_notes:
+                reasoning = (reasoning + " " + " ".join(evidence_notes))[:2048]
 
             tier: str = (
                 _compute_tier(

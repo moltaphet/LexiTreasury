@@ -12,7 +12,7 @@
     "tier_cap_1": "1000000000000000000000",
     "tier_cap_2": "500000000000000000000",
     "tier_cap_3": "100000000000000000000",
-    "allow_demo_owner_payout": true
+    "allow_demo_owner_payout": false
   },
   "contract_address": "0x9644619Cdc77A1caA43B1ec5b94412b8dF9993b0",
   "deployment_transaction": null,
@@ -20,5 +20,5 @@
   "deployed_at": null,
   "runner": "5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng",
   "sdk": "genlayer-js@2.0.0-rc.1",
-  "status": "deployed; Studio Dev schema verified read-only"
+  "status": "existing deployment; current source fixes pending redeployment; constructor arguments are not readable"
 }

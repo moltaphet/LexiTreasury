@@ -1,8 +1,8 @@
 # LexiTreasury
 
 LexiTreasury funds open-source work through one repository-qualified milestone
-grant flow. Repository activity, project tiers, the DAO constitution, maintainer
-verification, and audit attestations decide whether a grant may enter the treasury
+grant flow. Repository activity, project tiers, the DAO constitution, a repository
+payout assertion, and audit attestations decide whether a grant may enter the treasury
 funding stage. A funded grant then releases fixed milestone tranches only after
 commit-pinned evidence is reviewed by GenLayer consensus.
 
@@ -16,8 +16,8 @@ second app connection.
 The one-shot proposal API is deprecated in the active ABI. Its relevant policy and
 security behavior remain integrated into grant evaluation: commit and contributor
 tiers, structural quality, OSI license checks, DAO constitution evaluation,
-hash-bound trusted-auditor attestations, and the repository maintainer payout
-binding. A qualified grant must fit its tier cap in full. The contract rejects an
+hash-bound attestations submitted by registered auditor wallets, and a repository
+write-access-holder payout assertion. A qualified grant must fit its tier cap in full. The contract rejects an
 over-cap plan rather than silently trimming precommitted tranche amounts; its
 applicant can create a new plan with lower amounts. Grant funding remains backed
 by the owner-managed payable reserve, and recipients still withdraw released
@@ -68,17 +68,36 @@ CANCELLED                         FUNDED / IN_PROGRESS
   must increase. Terms cannot be edited. To change a plan, cancel the draft and
   create a replacement; rejection also requires a new grant.
 - Repository evaluation is a first consensus gate. It snapshots the current
-  constitution, tier caps, audit registry, and repository evidence. It enforces
-  maintainer binding to the designated recipient. Approval is allowed only if the
-  full milestone total is within the computed tier cap. It does not reserve funds.
+  constitution, tier caps, audit registry, and repository evidence. It checks that
+  the payout address asserted by a repository write-access holder matches the
+  designated recipient. That manifest is not cryptographic proof of the GitHub
+  owner's personal approval. Approval is allowed only if the full milestone total
+  is within the computed tier cap. A missing manifest (404) is unverified. Rate
+  limits and server failures abort evaluation transiently, leaving the grant in
+  `DRAFT` for retry. Malformed or oversized responses are definitive input errors,
+  not transient network failures. A root Contents
+  response at GitHub's 1,000-entry cap is checked against the default branch's
+  recursive Git Trees result (bounded to 100,000 entries and 8 MiB). A truncated or
+  over-budget tree produces a definitive, actionable incomplete-scan error; no
+  quality score is recorded and the grant remains `DRAFT`. The user must reduce the
+  scan size or contact the treasury owner for manual review before retrying.
+  Evaluation does not reserve funds.
+- An approved grant stores the evaluation-time tier-cap eligibility and allocated
+  total. Later cap changes apply to future evaluations; they do not strand or
+  invalidate an already approved grant. Funding still requires the owner, sufficient
+  reserve, and all milestone deadlines to remain in the future.
 - After approval, the owner funds the exact milestone total from the reserve. The
   contract rechecks that every deadline is still in the future. Only then are the
   milestone terms considered funded and locked.
 - The recipient can submit evidence only for the current milestone, using an HTTPS
   GitHub commit URL with a 40-character SHA in the grant repository. A rejected
-  submission can be retried until three submissions have been adjudicated or the
-  deadline passes. An approved milestone must be released before the next milestone
-  is available.
+  submission can be retried before the deadline, up to three total submissions.
+  The deadline prevents new submissions; it does not invalidate evidence accepted
+  before the deadline. That pending submission remains adjudicable and cannot be
+  expired or refunded before review. If it is rejected after the deadline, no retry
+  is possible and remaining escrow becomes refundable; a third rejection also makes
+  the grant refundable. An approved milestone can be released after its deadline.
+  An overdue milestone with no pending submission can be expired and refunded.
 - Adjudication fetches the specific commit and reviews its bounded file/change
   evidence against the stored criteria. The structured result is exactly a decision,
   reason code, and bounded summary. Criteria and GitHub data are untrusted content;
@@ -91,11 +110,41 @@ CANCELLED                         FUNDED / IN_PROGRESS
   an overdue unapproved milestone refundable and trigger the refund. Refund returns
   only unearned escrow to the treasury reserve; earned/released tranches remain
   claimable and are not clawed back.
-- The accounting invariant is `contract native balance = reserve + grant escrow +
+- The accounting invariant is `contract native balance >= reserve + grant escrow +
   claimable escrow`. Funding moves reserve to grant escrow; release moves grant
   escrow to claimable escrow; withdrawal pays claimable escrow; refund moves
   unearned grant escrow back to reserve. The contract checks each state transition
-  and balance bucket.
+  and balance bucket. `get_accounting()` reports `contract_balance`,
+  `total_liabilities` (reserve + grant escrow + claimable escrow) and
+  `is_solvent = contract_balance >= total_liabilities`. Grant escrow is included
+  because funded-but-unreleased tranches are still owed; a check against reserve and
+  claimable escrow alone would report a contract holding too little as solvent.
+
+## Live On-Chain Verification Table
+
+Transactions are produced by `scripts/interact_live.py` against Studio Next (chain
+ID 61997, `https://studio-next.genlayer.com/api`) and recorded, with the contract
+address and the SHA-256 of `contracts/lexitreasury.py`, in
+`deployments/studio-next.json`. **No live run has been recorded yet**, so this table
+is intentionally empty rather than filled with placeholders. Run `setup`, push one
+new commit to the grant repository, then run `finish` (see the script docstring) and
+paste the resulting rows here.
+
+| Step | Contract call | Tx hash | Result |
+| --- | --- | --- | --- |
+| 1 | `deposit` | _pending live run_ | |
+| 2 | `create_grant` | _pending live run_ | |
+| 3 | `evaluate_grant` | _pending live run_ | consensus APPROVED |
+| 4 | `fund_grant` | _pending live run_ | |
+| 5 | `submit_evidence` | _pending live run_ | |
+| 6 | `adjudicate` | _pending live run_ | consensus APPROVED |
+| 7 | `release_tranche` + `withdraw` | _pending live run_ | |
+| 8 | stale-commit `submit_evidence` + `adjudicate` | _pending live run_ | REJECTED (`EVIDENCE_INCOMPLETE`) |
+
+Each hash links to `https://explorer-studio-next.genlayer.com/tx/<hash>`. Step 8
+demonstrates the rejection path: the contract has no slashing mechanism, so the
+fraudulent submission is rejected and the milestone's escrow stays locked until it
+is refunded to the reserve.
 
 ## Studio Dev configuration
 
@@ -106,13 +155,21 @@ chain ID, and Studio Next Explorer base. Contract reads, writes, wallet network
 settings, and the app's contract Explorer link consume this record; the app builds
 the address-specific link from the configured Explorer base and contract address.
 
-The contract constructor accepts a final `allow_demo_owner_payout` boolean,
-defaulting to `true` for hackathon demo deployments. This accepts the applicant
-wallet as recipient when GitHub confirms the URL owner and the recipient is the
-applicant's wallet. It does not prove the applicant controls that GitHub account.
-Set it to `false` for production so repository maintainer verification requires
-the repo-controlled payout manifest. The active Studio Dev constructor values are
-recorded in the deployment configuration below.
+The contract constructor accepts a final `allow_demo_owner_payout` boolean that
+defaults to `false`. The active Studio Dev configuration also sets it to `false`;
+eligibility therefore requires a repository-controlled payout assertion manifest.
+That assertion can be changed by anyone with repository write access and does not
+prove personal approval by the GitHub owner. Setting the flag to `true` is an
+explicit demo-only opt-in and does not prove the applicant controls the GitHub
+account. The deployed contract exposes no
+getter or setter for this value, and the checked-in deployment record has no
+transaction hash with which to verify its constructor argument. The local
+configuration is not evidence of the deployed value. A new deployment with the
+flag set to `false` is required to guarantee fail-closed ownership on chain. The
+currently configured address is the earlier deployment; this checkout's source
+changes do not alter its bytecode. The deployed contract has no authorized upgrade
+path, so redeployment is also required to activate the timely-evidence, transient
+GitHub failure, repository completeness, and auditor-address fixes.
 
 | Setting | Value |
 |---|---|
@@ -181,13 +238,58 @@ audit. Skipped legacy assertions are not counted as passing coverage.
 
 ## Security notes
 
-- The owner controls constitution updates, tier caps, trusted auditor registration,
-  attestation recording/revocation, and reserve deposits. The applicant supplies
-  the repository, recipient, milestone criteria, amounts, and deadlines. The
-  recipient alone submits evidence. Contract checks, not UI controls, enforce roles.
+- The owner controls constitution updates, tier caps, auditor-address registration
+  and revocation, and reserve deposits. Only the registered active auditor wallet
+  named in an attestation can submit it; the owner cannot attest in that wallet's
+  name. The chain authenticates the transaction sender, but registration remains an
+  owner trust decision: the owner could enroll its own or a colluding address, so the
+  contract does not independently establish auditor qualifications. The applicant
+  supplies the repository, recipient, milestone criteria, amounts, and deadlines.
+  The recipient alone submits evidence. Contract checks enforce these roles.
 - Audit attestations count only when the repo manifest, report hash, repository
-  binding, and currently trusted auditor all match. Maintainer verification binds
-  the repository owner's published payout address to the grant recipient.
+  binding, and currently active auditor address all match. The payout manifest is
+  an assertion by someone with repository write access; it does not prove that the
+  GitHub owner personally approved the address. The demo bypass is disabled by
+  default and in active configuration, and is not ownership proof.
+- Evidence is bound to the verified maintainer and to the funding time. Adjudication
+  rejects a commit unless (a) the GitHub-API-resolved `author.login` equals the
+  grant's verified maintainer login (the git config name and email are
+  attacker-controlled and are ignored), and (b) both the author and committer dates
+  are on or after the milestone's `funded_at` block timestamp, so a pre-existing
+  commit cannot be replayed as new work. Limitation: git dates are set by whoever
+  creates the commit, so this stops replaying existing history but does not stop
+  someone who controls the maintainer account from forging a date. Organisation-owned
+  repositories, whose owner login is an organisation, cannot currently satisfy the
+  author binding.
+- Forked repositories are rejected at evaluation (`ERR_FORKED_REPO_UNSUPPORTED`)
+  because they inherit upstream history and metrics. `allow_demo_owner_payout`
+  defaults to `false` and is deployed `false`.
+- A submission made before the milestone deadline remains adjudicable after it. If
+  nobody adjudicates within 7 days of the deadline, the milestone may be expired and
+  refunded so escrow cannot be locked indefinitely.
+- Audit evidence is bounded: manifests to 16 KiB, report paths to 256 characters,
+  and report bodies to 256 KiB. Oversized or invalid evidence is rejected with a
+  specific audit status and cannot qualify as an attestation. The GenLayer web API
+  exposes response bodies after receiving them; `Content-Length` allows early
+  rejection when provided, while the local byte check occurs after the SDK has
+  received the body.
+- Other external response limits are 64 KiB for repository metadata, 512 KiB and
+  100 items per commit-list response, 512 KiB for Contents, 8 MiB for Git Trees,
+  16 KiB for the payout manifest, and 64 KiB for an individual commit response;
+  normalized commit evidence sent to review is capped at 32 KiB. Each response checks a
+  usable `Content-Length` before parsing and checks received bytes when that header
+  is absent or invalid. The GenLayer web API exposes the response after receiving it,
+  so the body limit bounds parsing and consensus work but cannot prevent the SDK from
+  first receiving an oversized body.
+- The constitution is nonempty and limited to 8,192 UTF-8 bytes, which also bounds
+  the policy portion of the evaluation prompt. The lifetime auditor registry is
+  capped at 64 wallet addresses and the attestation UID registry at 256 unique IDs.
+  Revoking a record does not free capacity; reactivating an existing auditor does
+  not consume another slot. Auditor and attestation storage is therefore bounded.
+- The treasury owner curates auditor addresses and may register their own wallet.
+  Only a currently active registered wallet can submit an attestation from its own
+  transaction sender address. This is owner-curated trust, not independent,
+  decentralized, or trustless auditor selection.
 - Repository text, milestone criteria, GitHub commit messages, paths, and patches
   are untrusted. Fetch hosts are constructed from validated GitHub identifiers;
   external fields are bounded and sanitized before LLM evaluation.

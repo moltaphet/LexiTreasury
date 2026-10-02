@@ -88,20 +88,22 @@ export default function Home() {
     treasury_balance: "0", claimable_escrow: "0", owner: "",
   });
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [loadMoreError, setLoadMoreError] = useState("");
   const [notice, setNotice] = useState<Notice>({ kind: "idle" });
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const reload = useCallback(async (append = false) => {
+  const reload = useCallback(async () => {
     setLoading(true);
     setLoadError("");
+    setLoadMoreError("");
     try {
-      const offset = append ? grants.length : 0;
       const [page, totals] = await Promise.all([
-        fetchGrantPage(offset, PAGE_SIZE),
+        fetchGrantPage(0, PAGE_SIZE),
         fetchAccounting(),
       ]);
-      setGrants((current) => append ? [...current, ...page.items] : page.items);
+      setGrants(page.items);
       setHasMore(page.has_more);
       setTotal(page.total);
       setAccounting({
@@ -117,7 +119,23 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [grants.length]);
+  }, []);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    setLoadMoreError("");
+    try {
+      const page = await fetchGrantPage(grants.length, PAGE_SIZE);
+      setGrants((current) => [...current, ...page.items]);
+      setHasMore(page.has_more);
+      setTotal(page.total);
+    } catch (error) {
+      setLoadMoreError(error instanceof Error ? error.message : "Could not load more grants.");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [grants.length, hasMore, loadingMore]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void reload(); }, 0);
@@ -244,9 +262,11 @@ export default function Home() {
           <GrantList
             grants={tab === "mine" ? myGrants : grants}
             loading={loading}
+            loadingMore={loadingMore}
             loadError={loadError}
+            loadMoreError={loadMoreError}
             hasMore={hasMore}
-            onLoadMore={() => void reload(true)}
+            onLoadMore={() => void loadMore()}
             account={wallet.address}
             refresh={() => setRefreshKey((key) => key + 1)}
             runAction={runAction}
@@ -331,7 +351,8 @@ function EvaluationPolicy() {
       {error ? <p className="inline-error">{error}</p> : policy ? <div className="policy-content">
         <p>{policy.constitution}</p>
         <div className="policy-caps">{["TIER_1", "TIER_2", "TIER_3"].map((tier) => <span key={tier}>{tier}<b>{formatGen(policy.caps[tier] ?? 0)} GEN cap</b></span>)}</div>
-        <small>Repository activity, contributors, engineering structure, OSI license, current auditor attestations, and verified maintainer payout binding are checked during grant evaluation.</small>
+        <small>Repository activity, contributors, engineering structure, OSI license, current auditor attestations, and the repository payout assertion are checked during grant evaluation. The payout manifest can be changed by any repository write-access holder; it is not proof that the GitHub owner personally approved the address. Constitution text is limited to 8,192 UTF-8 bytes. If a root listing reaches GitHub&apos;s 1,000-item limit, a bounded tree scan must establish completeness; a truncated or oversized tree stops evaluation with an actionable error instead of recording zero quality.</small>
+        <small>Auditor selection is controlled by the treasury owner, who can register their own wallet. Only an active registered wallet can submit an attestation from its own address; auditor selection is owner-curated, not independent or trustless. Audit manifests are limited to 16 KiB, report paths to 256 characters, and reports to 256 KiB.</small>
       </div> : <p className="policy-loading">Loading current on-chain policy…</p>}
     </details>
   );
@@ -359,18 +380,19 @@ function NoticeBar({ notice, onTrack, onDismiss }: {
   );
 }
 
-function GrantList({ grants, loading, loadError, hasMore, onLoadMore, account, refresh, runAction }: {
-  grants: Grant[]; loading: boolean; loadError: string; hasMore: boolean; onLoadMore: () => void;
+function GrantList({ grants, loading, loadingMore, loadError, loadMoreError, hasMore, onLoadMore, account, refresh, runAction }: {
+  grants: Grant[]; loading: boolean; loadingMore: boolean; loadError: string; loadMoreError: string; hasMore: boolean; onLoadMore: () => void;
   account: string | null; refresh: () => void;
   runAction: (label: string, work: () => Promise<`0x${string}`>) => Promise<boolean>;
 }) {
   if (loading && grants.length === 0) return <div className="empty-ledger">Loading the grants ledger…</div>;
   if (loadError) return <div className="load-error" role="alert"><p>{loadError}</p><button className="button button-outline" onClick={refresh}>Try again</button></div>;
-  if (grants.length === 0) return <div className="empty-ledger"><span className="empty-mark">＋</span><strong>No grants in this view yet.</strong><span>Start with a project, a measurable milestone and an amount earned on delivery.</span>{hasMore && <button className="button button-outline load-more" onClick={onLoadMore} disabled={loading}>{loading ? "Loading…" : "Load more grants"}</button>}</div>;
+  if (grants.length === 0) return <div className="empty-ledger"><span className="empty-mark">＋</span><strong>No grants in this view yet.</strong><span>Start with a project, a measurable milestone and an amount earned on delivery.</span>{hasMore && <button className="button button-outline load-more" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more grants"}</button>}</div>;
   return (
     <div className="grant-list">
+      {loadMoreError && <p className="inline-error" role="alert">{loadMoreError} <button className="text-link" onClick={onLoadMore}>Retry</button></p>}
       {grants.map((grant) => <GrantCard key={grant.grant_id} grant={grant} account={account} refresh={refresh} runAction={runAction} />)}
-      {hasMore && <button className="button button-outline load-more" onClick={onLoadMore} disabled={loading}>{loading ? "Loading…" : "Load more grants"}</button>}
+      {hasMore && <button className="button button-outline load-more" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more grants"}</button>}
     </div>
   );
 }
@@ -449,7 +471,7 @@ function GrantCard({ grant, account, refresh, runAction }: {
           <span>Contributors <b>{grant.contributor_bracket}</b></span>
           <span>Structure <b>{grant.quality_bracket}</b></span>
           <span>License <b>{grant.license_spdx || "none"} · OSI {grant.is_osi_approved}</b></span>
-          <span>Maintainer <b>{grant.maintainer_login || "unverified"} · {grant.maintainer_verified}</b></span>
+          <span>Payout assertion <b>{grant.maintainer_login || "unverified"} · {grant.maintainer_verified}</b></span>
           <span>Audit attestation <b>{grant.has_audit} {grant.audit_uid && `· ${grant.audit_uid}`}</b></span>
         </div>
       </div>}
@@ -461,10 +483,10 @@ function GrantCard({ grant, account, refresh, runAction }: {
         {current && grant.status !== "COMPLETED" && grant.status !== "REFUNDED" && grant.status !== "CANCELLED" && (
           <div className="action-panel">
             <p className="action-heading">CURRENT MILESTONE / {current.index + 1}</p>
-            {grant.status === "DRAFT" && <div className="action-row"><div><p>Repository eligibility is checked against the DAO constitution, tier rules, maintainer identity and audit attestations.</p><small>Evaluation is permissionless and does not move funds.</small></div><button className="button button-acid" disabled={!account} onClick={() => void performAction("Evaluate grant", () => evaluateGrant(account!, grant.grant_id))}>Evaluate grant</button></div>}
+            {grant.status === "DRAFT" && <div className="action-row"><div><p>Repository eligibility is checked against the DAO constitution, tier rules, payout assertion and audit attestations.</p><small>The payout manifest is controlled by repository write access; it does not prove personal approval by the GitHub owner. Evaluation is permissionless and does not move funds.</small></div><button className="button button-acid" disabled={!account} onClick={() => void performAction("Evaluate grant", () => evaluateGrant(account!, grant.grant_id))}>Evaluate grant</button></div>}
             {isApplicant && grant.status === "DRAFT" && <div className="action-row"><p>Cancel is available only while this grant is still an unfunded draft.</p><button className="button button-quiet" onClick={() => void performAction("Cancel draft", () => cancelDraft(account!, grant.grant_id))}>Cancel draft</button></div>}
             {grant.status === "REJECTED" && <div className="action-row"><div><p>This repository evaluation did not qualify the grant for funding.</p><small>{grant.evaluation_reasoning}</small></div></div>}
-            {grant.status === "APPROVED" && <div className="action-row"><div><p>Repository evaluation approved this plan at <strong>{grant.tier}</strong>.</p><small>Maintainer: {grant.maintainer_login || "verified"} · tier cap is enforced against the full milestone total.</small></div></div>}
+            {grant.status === "APPROVED" && <div className="action-row"><div><p>Repository evaluation approved this plan at <strong>{grant.tier}</strong>.</p><small>Payout assertion: {grant.maintainer_login || "matched"} · the full milestone total fit the tier cap at evaluation time. Later cap changes apply to future evaluations.</small></div></div>}
             {isFunder && grant.status === "APPROVED" && <FundAction grant={grant} account={account!} runAction={performAction} />}
             {isRecipient && (grant.status === "FUNDED" || grant.status === "IN_PROGRESS") && (current.status === "READY" || current.status === "REJECTED") && !currentDeadlinePassed && (
               <form className="evidence-form" onSubmit={(event) => { event.preventDefault(); void performAction("Submit pinned evidence", () => submitEvidence(account!, grant.grant_id, evidence)).then((ok) => { if (ok) setEvidence(""); }); }}>
@@ -573,7 +595,7 @@ function CreateGrant({ walletAddress, onCreate, onCreated }: {
       </form>
       <aside className="create-aside">
         <div className="total-card"><span>PLANNED GRANT VALUE</span><strong>{formatGen(total)} <small>GEN</small></strong><p>The treasury owner funds this exact milestone total from the reserve after repository evaluation.</p><div className="total-rule" />{steps.map((step, index) => <div className="total-line" key={index}><span>{step.title || `Milestone ${index + 1}`}</span><b>{step.amount || "0"} GEN</b></div>)}</div>
-        <div className="term-card"><span className="term-icon">⌁</span><strong>Before you submit</strong><ul><li>Review criteria, amount and deadline with the recipient.</li><li>The repository maintainer manifest must bind the recipient address for eligibility.</li><li>Terms cannot be edited; cancel and recreate an unfunded draft to change them.</li><li>Refunds return only unearned escrow to the treasury reserve after expiry or retry exhaustion.</li><li>Consensus reviews the submitted pinned commit against criteria; it cannot guarantee real-world completion.</li></ul></div>
+        <div className="term-card"><span className="term-icon">⌁</span><strong>Before you submit</strong><ul><li>Review criteria, amount and deadline with the recipient.</li><li>A repository payout manifest must assert the recipient address. Any write-access holder can change it; it is not proof of personal approval by the GitHub owner.</li><li>Terms cannot be edited; cancel and recreate an unfunded draft to change them.</li><li>Refunds return only unearned escrow to the treasury reserve after expiry or retry exhaustion.</li><li>Consensus reviews the submitted pinned commit against criteria; it cannot guarantee real-world completion.</li></ul></div>
       </aside>
     </div>
   );

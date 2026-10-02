@@ -28,7 +28,7 @@ GH_URL = "https://github.com/test-owner/test-repo"
 OWNER, REPO = "test-owner", "test-repo"
 LLM_ANCHOR = r".*governance engine for LexiTreasury.*"
 
-AUDITOR_ID = "trailofbits"
+AUDITOR_ID = "0x3333333333333333333333333333333333333333"
 AUDIT_UID = "att_0001"
 REPORT_PATH = "audit/report.pdf"
 REPORT_TEXT = "LexiTreasury verified audit report artefact v1"
@@ -130,6 +130,7 @@ def record_onchain_audit(treasury, vm, owner):
     vm.sender = owner
     if not treasury.is_trusted_auditor(AUDITOR_ID):
         treasury.register_trusted_auditor(AUDITOR_ID)
+    vm.sender = AUDITOR_ID
     treasury.record_audit_attestation(AUDIT_UID, GH_URL, AUDITOR_ID, REPORT_HASH)
     vm.sender = prev
 
@@ -195,6 +196,7 @@ def approve_milestone(treasury, vm, grant_id, recipient, sha, monkeypatch):
     treasury.submit_evidence(grant_id, f"{GH_URL}/commit/{sha}")
     vm.mock_web(rf".*api\.github\.com/repos/{OWNER}/{REPO}/commits/{sha}$", {
         "status": 200, "body": json.dumps({"sha": sha,
+            "author": {"login": OWNER},
             "commit": {"message": "Ship tested release", "author": {"date": "2030-01-02T00:00:00Z"}},
             "files": [{"filename": "tests/test_release.py", "status": "added", "additions": 4,
                        "deletions": 0, "patch": "+assert release"}]}),
