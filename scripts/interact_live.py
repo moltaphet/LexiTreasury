@@ -207,6 +207,22 @@ def phase_finish(args) -> None:
     print("Fraud path proven:", second["reason_code"], "-", second["summary"])
 
 
+def phase_stale(args) -> None:
+    """Extra fraud attempt on the current milestone with a small commit that predates funding."""
+    s = Session(os.environ["LEXI_OWNER_KEY"], os.environ["LEXI_RECIPIENT_KEY"])
+    grant_id = s.record["grant_id"]
+    index = int(s.read("get_grant", [grant_id])["current_index"])
+    s.write("9a reject_fraudulent_evidence: submit pre-funding commit", s.recipient, "submit_evidence",
+            [grant_id, args.stale_url])
+    s.write("9b reject_fraudulent_evidence: adjudicate", s.owner, "adjudicate", [grant_id])
+    ms = s.read("get_milestones", [grant_id, index, 1])["items"][0]
+    s.record["fraud_scenario_prefunding"] = {"status": ms["status"], "reason_code": ms["reason_code"],
+                                             "summary": ms["summary"]}
+    s.record["accounting"] = s.read("get_accounting")
+    save_record(s.record)
+    print("Result:", ms["status"], ms["reason_code"], "-", ms["summary"])
+
+
 def phase_check(_args) -> None:
     _, create_client, chain = load_sdk()
     client = create_client(chain=chain, endpoint=RPC_URL)
@@ -230,6 +246,9 @@ def main() -> None:
     finish.add_argument("--evidence-url", required=True)
     finish.add_argument("--stale-url", required=True)
     finish.set_defaults(fn=phase_finish)
+    stale = sub.add_parser("stale")
+    stale.add_argument("--stale-url", required=True)
+    stale.set_defaults(fn=phase_stale)
     args = parser.parse_args()
     args.fn(args)
 

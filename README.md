@@ -161,29 +161,53 @@ deployed contract's `get_accounting()` returns `is_solvent`. The explorer URL fo
 
 ## Live On-Chain Verification Table
 
-Transactions are produced by `scripts/interact_live.py` against Studio Next (chain
-ID 61997, `https://studio-next.genlayer.com/api`) and recorded, with the contract
-address and the SHA-256 of `contracts/lexitreasury.py`, in
-`deployments/studio-next.json`. The contract is deployed, but **no grant lifecycle has been run on it yet**, so this table
-is intentionally empty rather than filled with placeholders. Run `setup`, push one
-new commit to the grant repository, then run `finish` (see the script docstring) and
-paste the resulting rows here.
+Produced by `scripts/interact_live.py` against Studio Next (chain ID 61997) on contract
+`0x755D77CF9878872246220cc1Cd745c47ebd5cB44` and recorded in
+[`deployments/studio-next.json`](deployments/studio-next.json). Every row below
+finished with consensus `MAJORITY_AGREE` and VM result `FINISHED_WITH_RETURN`; the
+grant repository is `moltaphet/LexiTreasury` and the grant owner and recipient are the
+same account.
 
-| Step | Contract call | Tx hash | Result |
+| Step | Contract call | Tx | Result |
 | --- | --- | --- | --- |
-| 1 | `deposit` | _pending live run_ | |
-| 2 | `create_grant` | _pending live run_ | |
-| 3 | `evaluate_grant` | _pending live run_ | consensus APPROVED |
-| 4 | `fund_grant` | _pending live run_ | |
-| 5 | `submit_evidence` | _pending live run_ | |
-| 6 | `adjudicate` | _pending live run_ | consensus APPROVED |
-| 7 | `release_tranche` + `withdraw` | _pending live run_ | |
-| 8 | stale-commit `submit_evidence` + `adjudicate` | _pending live run_ | REJECTED (`EVIDENCE_INCOMPLETE`) |
+| 0 | deploy (new contract) | [`0xdce62e48…1d4516`](https://explorer-studio-next.genlayer.com/tx/0xdce62e487ca4aa226164cca6cdb12798d12c8d329e0ec65712ffe1e30f1d4516) | ACCEPTED |
+| 1 | `deposit` (4 GEN) | [`0x5c4c5cff…7387e6`](https://explorer-studio-next.genlayer.com/tx/0x5c4c5cffbf8f5e6f0da65890428985bd932ce73f23ed6ad70ac263dc1a7387e6) | treasury balance 4 GEN |
+| 2a | `create_grant` (grant_1) | [`0xa755b265…8a35bb`](https://explorer-studio-next.genlayer.com/tx/0xa755b2651cf857011e2475724cd0291a9a156983a72ea6f2ab9aba7a738a35bb) | executed |
+| 3a | `evaluate_grant` (grant_1) | [`0x8b342396…0e4df0`](https://explorer-studio-next.genlayer.com/tx/0x8b342396f627c90b50455dce9955d0b254e40e30b9a2c060e85c14d37d0e4df0) | consensus **REJECTED**: the original constitution required milestone terms the evaluator cannot see |
+| 2b | `update_constitution` | [`0x2fe483ba…c35a6e`](https://explorer-studio-next.genlayer.com/tx/0x2fe483badf7eb91cb1a472fb8fdfcb7e3df704df79edf25957d83e7012c35a6e) | milestone clause moved out of the LLM-evaluated policy |
+| 2 | `create_grant` (grant_2, 2 milestones, 3 GEN) | [`0x049b7e91…522a60`](https://explorer-studio-next.genlayer.com/tx/0x049b7e91b46db83f290603f79d666ca300b3bd86cc661010c02ef6b52e522a60) | executed |
+| 3 | `evaluate_grant` (grant_2) | [`0x7684611f…50dc16`](https://explorer-studio-next.genlayer.com/tx/0x7684611f42b33f8ab7a2ecb6dbd0593aff82d5293c054f8ede272acbf150dc16) | consensus **APPROVED** |
+| 4 | `fund_grant` | [`0x1f98ac94…4c13a0`](https://explorer-studio-next.genlayer.com/tx/0x1f98ac94d437b87d6d5c0f5bf344df4e8d2ee0b65a5245b6e729e795ff4c13a0) | 3 GEN moved to grant escrow |
+| 5 | `submit_evidence` (commit `bd167a8`, authored after funding) | [`0x7295f65a…d57d4b`](https://explorer-studio-next.genlayer.com/tx/0x7295f65a3d5417858c9573f881e5fc5c39f9b9a1b64f30f515770a9916d57d4b) | milestone SUBMITTED |
+| 6 | `adjudicate` | [`0x120cee17…d59106`](https://explorer-studio-next.genlayer.com/tx/0x120cee17245b847cc7a561afe3c0fab19cfdc95277a38f8ed537d60872d59106) | consensus **APPROVE** / `CRITERIA_MET` |
+| 7a | `release_tranche` | [`0x7ab2b47c…9ad7c6`](https://explorer-studio-next.genlayer.com/tx/0x7ab2b47c1b36a33c6e69e8bcdc8a085b8db5253cf58811305c54c6f4459ad7c6) | 2 GEN to claimable |
+| 7b | `withdraw` | [`0xd726e393…5e1187`](https://explorer-studio-next.genlayer.com/tx/0xd726e393df45c206dbfa7745616fe19617347e204e7bb5dd48678580045e1187) | 2 GEN paid out |
+| 8a | `submit_evidence` (commit `ea64d58`, before funding) | [`0x47c1d12a…61043e`](https://explorer-studio-next.genlayer.com/tx/0x47c1d12a7a437e21e131b6906b5dcf520a18810c0dad10054b3449f3ef61043e) | SUBMITTED |
+| 8b | `adjudicate` | [`0xae205781…192c90`](https://explorer-studio-next.genlayer.com/tx/0xae20578113048c1e2195f88512b0d2bbd6693ad15c7937704a00ceaef3192c90) | **REJECTED** / `EVIDENCE_INCOMPLETE`: response exceeds the review limit (size gate fired first) |
+| 9a | `submit_evidence` (commit `10acd19`, before funding) | [`0x58e8de8b…e86d1e`](https://explorer-studio-next.genlayer.com/tx/0x58e8de8b68e2a8372c04b4393db6ed76dc6a219d68ffd7b4596f552bd5e86d1e) | SUBMITTED |
+| 9b | `adjudicate` | [`0xcd3b9fab…41163a`](https://explorer-studio-next.genlayer.com/tx/0xcd3b9fabcc8179b874a914f5f9d15810cbdea87cf26fe64acce7f5da2241163a) | **REJECTED** / `EVIDENCE_INCOMPLETE`: commit predates grant funding |
 
-Each hash links to `https://explorer-studio-next.genlayer.com/tx/<hash>`. Step 8
-demonstrates the rejection path: the contract has no slashing mechanism, so the
-fraudulent submission is rejected and the milestone's escrow stays locked until it
-is refunded to the reserve.
+Final on-chain accounting: contract balance 2 GEN = reserve 1 GEN + grant escrow 1 GEN
++ claimable 0 GEN, `is_solvent: true`, 2 GEN released and withdrawn.
+
+Notes on what this does and does not show:
+
+- Step 8 exercises the rejection path, but the stated reason was the response-size
+  limit, not the date rule. Step 9 uses a small pre-funding commit and demonstrates
+  the `funded_at` freshness rule specifically. The author-login rule was not
+  exercised live (covered by direct tests only).
+- The contract has no slashing: rejected evidence leaves the milestone's escrow
+  locked until it is refunded to the reserve.
+- Two earlier deployments were discarded. Live testing found that
+  `gl.vm.get_timestamp()` fails on the Studio Next runner, so `create_grant` could not
+  succeed; the contract now reads `gl.message.raw["datetime"]` and direct tests no
+  longer stub the clock call.
+- Step 3a/2b: the first grant was rejected because the constitution asked the LLM to
+  check milestone terms that it is never shown. The owner reworded the policy so
+  milestone mechanics are contract-enforced. The approval in step 3 therefore reflects
+  the reworded constitution, which the deployment record and
+  `frontend/config/studio-dev-deployment.json` now carry.
+- Explorer URL formats (`/tx/<hash>`) were not verified in a browser.
 
 ## Studio Dev configuration
 

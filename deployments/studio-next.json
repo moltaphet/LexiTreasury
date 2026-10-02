@@ -81,6 +81,70 @@
       "note": "",
       "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x1f98ac94d437b87d6d5c0f5bf344df4e8d2ee0b65a5245b6e729e795ff4c13a0",
       "recorded_at": 1790934364
+    },
+    {
+      "step": "5 submit_evidence",
+      "tx_hash": "0x7295f65a3d5417858c9573f881e5fc5c39f9b9a1b64f30f515770a9916d57d4b",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x7295f65a3d5417858c9573f881e5fc5c39f9b9a1b64f30f515770a9916d57d4b",
+      "recorded_at": 1790934400
+    },
+    {
+      "step": "6 adjudicate_milestone",
+      "tx_hash": "0x120cee17245b847cc7a561afe3c0fab19cfdc95277a38f8ed537d60872d59106",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "consensus decision",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x120cee17245b847cc7a561afe3c0fab19cfdc95277a38f8ed537d60872d59106",
+      "recorded_at": 1790934427
+    },
+    {
+      "step": "7a claim_payout (release_tranche)",
+      "tx_hash": "0x7ab2b47c1b36a33c6e69e8bcdc8a085b8db5253cf58811305c54c6f4459ad7c6",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x7ab2b47c1b36a33c6e69e8bcdc8a085b8db5253cf58811305c54c6f4459ad7c6",
+      "recorded_at": 1790934449
+    },
+    {
+      "step": "7b claim_payout (withdraw)",
+      "tx_hash": "0xd726e393df45c206dbfa7745616fe19617347e204e7bb5dd48678580045e1187",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0xd726e393df45c206dbfa7745616fe19617347e204e7bb5dd48678580045e1187",
+      "recorded_at": 1790934466
+    },
+    {
+      "step": "8a reject_fraudulent_evidence: submit stale commit",
+      "tx_hash": "0x47c1d12a7a437e21e131b6906b5dcf520a18810c0dad10054b3449f3ef61043e",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x47c1d12a7a437e21e131b6906b5dcf520a18810c0dad10054b3449f3ef61043e",
+      "recorded_at": 1790934479
+    },
+    {
+      "step": "8b reject_fraudulent_evidence: adjudicate",
+      "tx_hash": "0xae20578113048c1e2195f88512b0d2bbd6693ad15c7937704a00ceaef3192c90",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0xae20578113048c1e2195f88512b0d2bbd6693ad15c7937704a00ceaef3192c90",
+      "recorded_at": 1790934491
+    },
+    {
+      "step": "9a reject_fraudulent_evidence: submit pre-funding commit",
+      "tx_hash": "0x58e8de8b68e2a8372c04b4393db6ed76dc6a219d68ffd7b4596f552bd5e86d1e",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0x58e8de8b68e2a8372c04b4393db6ed76dc6a219d68ffd7b4596f552bd5e86d1e",
+      "recorded_at": 1790934524
+    },
+    {
+      "step": "9b reject_fraudulent_evidence: adjudicate",
+      "tx_hash": "0xcd3b9fabcc8179b874a914f5f9d15810cbdea87cf26fe64acce7f5da2241163a",
+      "status": "MAJORITY_AGREE/FINISHED_WITH_RETURN",
+      "note": "",
+      "explorer_url": "https://explorer-studio-next.genlayer.com/tx/0xcd3b9fabcc8179b874a914f5f9d15810cbdea87cf26fe64acce7f5da2241163a",
+      "recorded_at": 1790934541
     }
   ],
   "superseded_deployments": [
@@ -98,5 +162,26 @@
     }
   ],
   "grant_id": "grant_2",
-  "repository": "https://github.com/moltaphet/LexiTreasury"
+  "repository": "https://github.com/moltaphet/LexiTreasury",
+  "fraud_scenario": {
+    "status": "REJECTED",
+    "reason_code": "EVIDENCE_INCOMPLETE",
+    "summary": "GitHub commit response exceeds the review limit."
+  },
+  "accounting": {
+    "claimable_escrow": 0,
+    "contract_balance": 2000000000000000000,
+    "grant_escrow": 1000000000000000000,
+    "is_solvent": true,
+    "owner": "0x6ec5cb7469a661b8e23b4867359893a25116ea19",
+    "total_liabilities": 2000000000000000000,
+    "total_refunded": 0,
+    "total_released": 2000000000000000000,
+    "treasury_balance": 1000000000000000000
+  },
+  "fraud_scenario_prefunding": {
+    "status": "REJECTED",
+    "reason_code": "EVIDENCE_INCOMPLETE",
+    "summary": "Commit predates grant funding or has an invalid timestamp."
+  }
 }
