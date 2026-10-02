@@ -4,8 +4,8 @@ pytest plugin (hydra_pytest uses typing.io which was removed in 3.12+).
 
 Usage:
     python run_tests.py
-    python run_tests.py tests/test_lexitreasury.py -v
-    python run_tests.py tests/test_lexitreasury.py -k test_tier
+    python run_tests.py tests/direct/test_milestone_lifecycle.py -v
+    python run_tests.py tests/direct/test_milestone_lifecycle.py -k test_refund
 """
 import sys
 import importlib.metadata
@@ -37,5 +37,5 @@ _pm.PluginManager.load_setuptools_entrypoints = _safe_load
 
 import pytest
 
-args = sys.argv[1:] or ["tests/test_lexitreasury.py", "-v"]
+args = sys.argv[1:] or ["tests/direct/test_milestone_lifecycle.py", "-v"]
 sys.exit(pytest.main(args))

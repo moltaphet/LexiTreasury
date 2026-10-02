@@ -38,7 +38,7 @@ def _load_lexi_module():
     # single-contract guard. Clear it so subsequent direct_deploy() calls in the same
     # session can register their own freshly-imported class without a false collision.
     try:
-        import genlayer.gl.genvm_contracts as _gc
+        import genlayer.contract as _gc
         _gc.__known_contract__ = None
     except Exception:
         pass

@@ -9,7 +9,8 @@
   "contract": {
     "name": "LexiTreasury",
     "version": "3.0-lifecycle",
-    "source": "contracts/lexitreasury.py",
+    "source_path_at_deployment": "contracts/lexitreasury.py",
+    "source_revision_at_deployment": "b677096ad3c2199d0342b4239f3e66e7ef701b8c",
     "address": "0xBE623B407Cbc54C84Dcba97c6040E7b8469F17cf",
     "deploy_tx": "0x9d9474577c26c44d661c920b5ffb5bab75ac07b482bd4194ef48288008a72251",
     "deployed_at": "2026-09-02"

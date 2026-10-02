@@ -18,6 +18,7 @@ module.exports = createJestConfig({
     "<rootDir>/tests/integration/**/*.test.ts",
   ],
   testTimeout: 30000,
+  setupFiles: ["<rootDir>/jest.setup.js"],
   testPathIgnorePatterns: ["/node_modules/", "/.next/", "/tests/e2e/"],
   verbose: true,
 });
